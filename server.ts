@@ -9,24 +9,26 @@ app.use(express.json());
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
+// Ruta de comprobación para que no dé 404 si se abre desde el navegador
+app.get('/api/gemini/project-copy', (req: any, res: any) => {
+  res.json({ status: 'API de Torchill funcionando correctamente. Envía un POST para procesar con IA.' });
+});
+
 app.post('/api/gemini/project-copy', async (req: any, res: any) => {
   try {
     const { action, text, language, title, lead, discipline, sections, imageAlts, segments } = req.body;
 
     if (action === 'translate') {
-      const prompt = `Traduce los siguientes textos al idioma ${language === 'en' ? 'inglés' : 'español'}, manteniendo el tono profesional y de diseño. Devuelve ÚNICAMENTE un objeto JSON con el array "translations" de strings traducidos.\nTextos: ${JSON.stringify(segments)}`;
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-      });
-      const rawText = response.text || '{}';
+      const prompt = `Traduce los siguientes textos al idioma ${language === 'en' ? 'inglés' : 'español'}, manteniendo el tono profesional y de diseño. Devuelve ÚNICAMENTE un objeto JSON válido con el array "translations" de strings traducidos.\nTextos: ${JSON.stringify(segments)}`;
+      const result = await model.generateContent(prompt);
+      const rawText = result.response.text() || '{}';
       const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
       return res.json(JSON.parse(cleanJson));
     }
 
     const prompt = `Actúa como un director de arte editorial. Mejora los siguientes textos del caso de estudio "${title}" para un portafolio de diseño de alto nivel.
     Texto actual: ${text}
-    Devuelve ÚNICAMENTE un objeto JSON válido con la siguiente estructura:
+    Devuelve ÚNICAMENTE un objeto JSON válido con la siguiente estructura exacta:
     {
       "lead": "Un párrafo de introducción potente y pulido",
       "discipline": "Disciplina depurada",
@@ -34,12 +36,8 @@ app.post('/api/gemini/project-copy', async (req: any, res: any) => {
       "imageAlts": ["alt de imagen 1"]
     }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-    });
-
-    const rawText = response.text || '{}';
+    const result = await model.generateContent(prompt);
+    const rawText = result.response.text() || '{}';
     const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
     res.json(JSON.parse(cleanJson));
   } catch (error: any) {
