@@ -1,6 +1,14 @@
 import express from 'express';
 import cors from 'cors';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+// Forzamos el uso de la versión v1 de la API si la v1beta da 404
+const model = genAI.getGenerativeModel({
+  model: process.env.GEMINI_MODEL || "gemini-1.5-flash"
+}, { apiVersion: 'v1' });
 
 const app = express();
 app.use(cors());
