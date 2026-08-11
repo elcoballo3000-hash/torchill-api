@@ -7,23 +7,22 @@ app.use(cors());
 app.use(express.json());
 
 const apiKey = process.env.GEMINI_API_KEY || '';
-const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+const modelName = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 
 const genAI = new GoogleGenerativeAI(apiKey);
+const model = genAI.getGenerativeModel({ model: modelName });
 
-// Forzamos el uso de la versión v1 de la API para evitar conflictos de modelos y rutas
-const model = genAI.getGenerativeModel({
-  model: modelName
-}, { apiVersion: 'v1' });
-
-// Ruta de comprobación GET
 app.get('/api/gemini/project-copy', (req: any, res: any) => {
   res.json({ status: 'API de Torchill funcionando correctamente. Envía un POST para procesar con IA.' });
 });
 
-// Ruta principal POST
 app.post('/api/gemini/project-copy', async (req: any, res: any) => {
   try {
+    // Validación por si envían el body vacío
+    if (!req.body || Object.keys(req.body).length === 0) {
+      return res.status(400).json({ error: 'El cuerpo de la petición debe ser un JSON válido.' });
+    }
+
     const { action, text, language, title, segments } = req.body;
 
     if (action === 'translate') {
