@@ -7,7 +7,7 @@ app.use(cors());
 app.use(express.json());
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: 'gemini-3-flash' });
+const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
 // Ruta de comprobación para que no dé 404 si se abre desde el navegador
 app.get('/api/gemini/project-copy', (req: any, res: any) => {
