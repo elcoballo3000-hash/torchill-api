@@ -60,7 +60,9 @@ const apiKeys = [
   process.env.GEMINI_API_KEY_5,
   process.env.GEMINI_API_KEY_6,
   process.env.GEMINI_API_KEY_7,
-  process.env.GEMINI_API_KEY_8,
+  process.env.GEMINI_API_KEY_8,  
+  process.env.GEMINI_API_KEY_9,
+  process.env.GEMINI_API_KEY_10,
 ].filter(
   (key): key is string =>
     typeof key === 'string' &&
