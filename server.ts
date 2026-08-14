@@ -1,8 +1,4 @@
-import express, {
-  Request,
-  Response,
-  NextFunction,
-} from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { GoogleGenAI } from '@google/genai';
 import multer from 'multer';
@@ -26,9 +22,6 @@ const modelName =
 const API_TOKEN =
   process.env.API_TOKEN;
 
-/*
- * Tamaño máximo permitido para archivos.
- */
 const MAX_UPLOAD_SIZE =
   20 * 1024 * 1024;
 
@@ -395,6 +388,40 @@ function getRequestBody(
 }
 
 /* =========================================================
+   PARÁMETRO STRING DE EXPRESS
+   ========================================================= */
+
+/*
+ * Express puede tipar algunos parámetros como
+ * string | string[].
+ *
+ * Esta función garantiza que siempre obtengamos
+ * un string antes de pasarlo a funciones que
+ * requieren string.
+ */
+
+function getParamString(
+  value:
+    | string
+    | string[]
+    | undefined
+): string {
+  if (
+    typeof value === 'string'
+  ) {
+    return value;
+  }
+
+  if (
+    Array.isArray(value)
+  ) {
+    return value[0] || '';
+  }
+
+  return '';
+}
+
+/* =========================================================
    PARSEAR JSON DE GEMINI
    ========================================================= */
 
@@ -429,11 +456,9 @@ function parseGeminiJson(
       );
 
     if (objectMatch) {
-      try {
-        return JSON.parse(
-          objectMatch[0]
-        );
-      } catch {}
+      return JSON.parse(
+        objectMatch[0]
+      );
     }
 
     const arrayMatch =
@@ -442,11 +467,9 @@ function parseGeminiJson(
       );
 
     if (arrayMatch) {
-      try {
-        return JSON.parse(
-          arrayMatch[0]
-        );
-      } catch {}
+      return JSON.parse(
+        arrayMatch[0]
+      );
     }
 
     throw new Error(
@@ -859,45 +882,40 @@ function mimeForPath(
     return 'image/jpeg';
   }
 
-  if (
-    lower.endsWith('.bmp')
-  ) {
-    return 'image/bmp';
-  }
-
   return 'application/octet-stream';
 }
 
 /* =========================================================
-   DETECTAR MIME TYPE DESDE URL / HEADER
+   MIME TYPE DESDE URL / HEADER
    ========================================================= */
 
 function getMimeType(
   fileUrl: string,
   contentType: string
 ): string {
-  const normalizedContentType =
+  const normalized =
     contentType
       .split(';')[0]
       .trim()
       .toLowerCase();
 
   if (
-    normalizedContentType &&
-    normalizedContentType !==
+    normalized &&
+    normalized !==
       'application/octet-stream'
   ) {
-    return normalizedContentType;
+    return normalized;
   }
 
   try {
     const parsed =
-      new URL(
-        fileUrl
-      );
+      new URL(fileUrl);
+
+    const pathname =
+      parsed.pathname;
 
     return mimeForPath(
-      parsed.pathname
+      pathname
     );
   } catch {
     return 'application/octet-stream';
@@ -936,26 +954,14 @@ async function downloadGithubFile(
     `/${encodeURIComponent(repo)}/contents/${encodedPath}` +
     `?ref=${encodeURIComponent(branch)}`;
 
-  /*
-   * Pedimos el archivo como contenido RAW.
-   *
-   * Esto evita depender del campo "content" de la API
-   * de GitHub, que puede no estar disponible para archivos
-   * grandes.
-   */
-
   const response =
     await fetch(
       url,
       {
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-          Accept:
-            'application/vnd.github.raw',
-          'X-GitHub-Api-Version':
-            '2022-11-28',
-        },
+        headers:
+          githubHeaders(
+            token
+          ),
       }
     );
 
@@ -977,12 +983,30 @@ async function downloadGithubFile(
     );
   }
 
-  const arrayBuffer =
-    await response.arrayBuffer();
+  const result =
+    await response.json();
+
+  if (
+    result.type !==
+      'file' ||
+    typeof result.content !==
+      'string'
+  ) {
+    throw new Error(
+      'GitHub no devolvió un archivo válido.'
+    );
+  }
+
+  const cleanBase64 =
+    result.content.replace(
+      /\s/g,
+      ''
+    );
 
   const buffer =
     Buffer.from(
-      arrayBuffer
+      cleanBase64,
+      'base64'
     );
 
   if (
@@ -1040,8 +1064,7 @@ async function pdfFirstPageToPng(
         scale: 1,
       });
 
-    const maxSide =
-      1600;
+    const maxSide = 1600;
 
     const scale =
       Math.min(
@@ -1088,7 +1111,7 @@ async function pdfFirstPageToPng(
 }
 
 /* =========================================================
-   DESCARGAR RECEIPT DESDE URL
+   DESCARGAR RECEIPT
    ========================================================= */
 
 async function downloadReceipt(
@@ -1233,9 +1256,31 @@ app.get(
     res: Response
   ) => {
     try {
+      /*
+       * FIX PRINCIPAL DEL ERROR TS2345:
+       *
+       * req.params.pathB64 puede ser tratado por
+       * TypeScript como string | string[].
+       *
+       * Lo normalizamos a string antes de llamar
+       * a decodePathB64().
+       */
+
+      const pathB64 =
+        getParamString(
+          req.params.pathB64
+        );
+
+      if (!pathB64) {
+        return res.status(400).json({
+          error:
+            'Falta el parámetro pathB64.',
+        });
+      }
+
       const path =
         decodePathB64(
-          req.params.pathB64
+          pathB64
         );
 
       const {
@@ -1377,16 +1422,6 @@ app.post(
       const body =
         getRequestBody(req);
 
-      /*
-       * También acepta JSON:
-       *
-       * {
-       *   dataBase64: "...",
-       *   fileName: "ticket.pdf",
-       *   mimeType: "application/pdf"
-       * }
-       */
-
       if (!buffer) {
         const dataBase64 =
           typeof body.dataBase64 ===
@@ -1464,13 +1499,7 @@ app.post(
             : mimeType ===
                 'image/png'
               ? 'png'
-              : mimeType ===
-                  'image/webp'
-                ? 'webp'
-                : mimeType ===
-                    'image/gif'
-                  ? 'gif'
-                  : 'jpg'
+              : 'jpg'
         );
 
       let requestedPath =
@@ -1989,41 +2018,13 @@ app.post(
         }
       }
 
-      /* ===================================================
-         3. VALIDAR TIPO DE ARCHIVO
-         =================================================== */
-
-      const allowedMimeTypes = [
-        'image/jpeg',
-        'image/png',
-        'image/webp',
-        'image/gif',
-        'image/bmp',
-      ];
-
-      if (
-        !allowedMimeTypes.includes(
-          mimeType
-        )
-      ) {
-        return res.status(415).json({
-          error:
-            'El archivo debe ser un PDF o una imagen compatible.',
-          mimeType,
-        });
-      }
-
-      /* ===================================================
-         4. BASE64
-         =================================================== */
-
       const base64 =
         buffer.toString(
           'base64'
         );
 
       /* ===================================================
-         5. ANALIZAR CON GEMINI
+         3. ANALIZAR CON GEMINI
          =================================================== */
 
       const geminiPrompt = `
@@ -2083,7 +2084,7 @@ IMPORTANTE:
       }
 
       /* ===================================================
-         6. PARSEAR JSON
+         4. PARSEAR JSON
          =================================================== */
 
       const parsed =
@@ -2144,36 +2145,6 @@ app.use(
     return res.status(404).json({
       error:
         'Endpoint no encontrado.',
-    });
-  }
-);
-
-/* =========================================================
-   ERROR HANDLER
-   ========================================================= */
-
-app.use(
-  (
-    error: unknown,
-    _req: Request,
-    res: Response,
-    _next: NextFunction
-  ) => {
-    console.error(
-      'Unhandled server error:',
-      error
-    );
-
-    const message =
-      error instanceof Error
-        ? error.message
-        : String(error);
-
-    return res.status(500).json({
-      error:
-        'Error interno del servidor.',
-      details:
-        message,
     });
   }
 );
