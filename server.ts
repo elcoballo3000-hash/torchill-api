@@ -390,7 +390,300 @@ function parseGeminiJson(
 /* =========================================================
    AUTH PARA RECEIPTS
    ========================================================= */
+/* =========================================================
+   GITHUB STORAGE
+   ========================================================= */
 
+function ghConfig() {
+  const owner = process.env.GITHUB_OWNER;
+  const repo = process.env.GITHUB_REPO;
+  const branch =
+    process.env.GITHUB_BRANCH || 'main';
+  const token = process.env.GITHUB_TOKEN;
+
+  if (!owner || !repo || !token) {
+    throw new Error(
+      'Faltan GITHUB_OWNER, GITHUB_REPO o GITHUB_TOKEN en Render.'
+    );
+  }
+
+  return {
+    owner,
+    repo,
+    branch,
+    token,
+  };
+}
+
+function validateGithubPath(
+  path: string
+): string {
+  const normalized = path
+    .replace(/^\/+/, '')
+    .replace(/\\/g, '/');
+
+  if (
+    !normalized ||
+    normalized.includes('..') ||
+    normalized.startsWith('.git/')
+  ) {
+    throw new Error(
+      'Ruta de archivo inválida.'
+    );
+  }
+
+  return normalized;
+}
+
+function encodePathForGithub(
+  path: string
+): string {
+  return path
+    .split('/')
+    .map((part) =>
+      encodeURIComponent(part)
+    )
+    .join('/');
+}
+
+function encodePathB64(
+  path: string
+): string {
+  return Buffer.from(
+    path,
+    'utf8'
+  )
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function decodePathB64(
+  value: string
+): string {
+  let normalized = value
+    .replace(/-/g, '+')
+    .replace(/_/g, '/');
+
+  while (
+    normalized.length % 4 !== 0
+  ) {
+    normalized += '=';
+  }
+
+  return validateGithubPath(
+    Buffer.from(
+      normalized,
+      'base64'
+    ).toString('utf8')
+  );
+}
+
+function githubHeaders(
+  token: string
+) {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept:
+      'application/vnd.github+json',
+    'X-GitHub-Api-Version':
+      '2022-11-28',
+    'Content-Type':
+      'application/json',
+  };
+}
+
+async function getGithubFile(
+  path: string
+) {
+  const {
+    owner,
+    repo,
+    branch,
+    token,
+  } = ghConfig();
+
+  const encodedPath =
+    encodePathForGithub(path);
+
+  const url =
+    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+    `/${encodeURIComponent(repo)}/contents/${encodedPath}` +
+    `?ref=${encodeURIComponent(branch)}`;
+
+  const response =
+    await fetch(url, {
+      headers:
+        githubHeaders(token),
+    });
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return null;
+    }
+
+    const text =
+      await response.text();
+
+    throw new Error(
+      `GitHub GET error ${response.status}: ${text}`
+    );
+  }
+
+  return response.json();
+}
+
+async function uploadToGithub(
+  path: string,
+  data: Buffer
+) {
+  const {
+    owner,
+    repo,
+    branch,
+    token,
+  } = ghConfig();
+
+  const safePath =
+    validateGithubPath(path);
+
+  if (
+    data.length >
+    MAX_UPLOAD_SIZE
+  ) {
+    throw new Error(
+      'El archivo supera el límite máximo de 20 MB.'
+    );
+  }
+
+  const existing =
+    await getGithubFile(
+      safePath
+    );
+
+  const url =
+    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+    `/${encodeURIComponent(repo)}/contents/${encodePathForGithub(safePath)}`;
+
+  const body: Record<string, any> = {
+    message:
+      `Torchill receipt upload: ${safePath}`,
+    content:
+      data.toString('base64'),
+    branch,
+  };
+
+  if (
+    existing &&
+    typeof existing.sha === 'string'
+  ) {
+    body.sha = existing.sha;
+  }
+
+  const response =
+    await fetch(url, {
+      method: 'PUT',
+      headers:
+        githubHeaders(token),
+      body: JSON.stringify(body),
+    });
+
+  if (!response.ok) {
+    const text =
+      await response.text();
+
+    throw new Error(
+      `GitHub upload error ${response.status}: ${text}`
+    );
+  }
+
+  const result =
+    await response.json();
+
+  return {
+    path: safePath,
+    sha:
+      result.content?.sha || null,
+    branch,
+    owner,
+    repo,
+    pathB64:
+      encodePathB64(safePath),
+  };
+}
+/* =========================================================
+   PDF -> PNG
+   ========================================================= */
+
+async function pdfFirstPageToPng(
+  buffer: Buffer
+): Promise<Buffer> {
+  const loadingTask =
+    pdfjsLib.getDocument({
+      data:
+        new Uint8Array(buffer),
+      isEvalSupported: false,
+      useSystemFonts: false,
+    });
+
+  const pdf =
+    await loadingTask.promise;
+
+  try {
+    if (pdf.numPages < 1) {
+      throw new Error(
+        'El PDF no contiene páginas.'
+      );
+    }
+
+    const page =
+      await pdf.getPage(1);
+
+    const base =
+      page.getViewport({
+        scale: 1,
+      });
+
+    const maxSide = 1600;
+
+    const scale =
+      Math.min(
+        2,
+        maxSide /
+          Math.max(
+            base.width,
+            base.height
+          )
+      );
+
+    const viewport =
+      page.getViewport({
+        scale,
+      });
+
+    const canvas =
+      createCanvas(
+        Math.ceil(viewport.width),
+        Math.ceil(viewport.height)
+      );
+
+    const context =
+      canvas.getContext('2d');
+
+    await page.render({
+      canvasContext:
+        context as any,
+      viewport,
+    }).promise;
+
+    return canvas.toBuffer(
+      'image/png'
+    );
+  } finally {
+    await pdf.destroy();
+  }
+}
 function auth(
   req: Request,
   res: Response,
