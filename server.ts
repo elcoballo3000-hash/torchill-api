@@ -5,14 +5,10 @@ import express, {
 } from 'express';
 
 import cors from 'cors';
-
-import {
-  GoogleGenAI,
-} from '@google/genai';
-
 import multer from 'multer';
+import crypto from 'node:crypto';
 
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
+import { GoogleGenAI } from '@google/genai';
 
 import {
   createCanvas,
@@ -21,22 +17,58 @@ import {
   ImageData,
 } from 'canvas';
 
-import * as napiCanvas from '@napi-rs/canvas';
+/* =========================================================
+   TIPOS
+   ========================================================= */
 
-import crypto from 'node:crypto';
+type JsonObject = Record<string, any>;
+
+interface KeyState {
+  ai: GoogleGenAI;
+  blockedUntil: number;
+  keyNumber: number;
+}
+
+interface DownloadedFile {
+  buffer: Buffer;
+  mimeType: string;
+}
 
 /* =========================================================
-   PDFJS + @napi-rs/canvas
+   PDF.JS
+   =========================================================
+   Se carga dinámicamente para evitar problemas entre
+   CommonJS / ESM con las versiones modernas de pdfjs-dist.
+   ========================================================= */
+
+let pdfjsPromise: Promise<any> | null = null;
+
+async function getPdfJs(): Promise<any> {
+  if (!pdfjsPromise) {
+    pdfjsPromise = new Function(
+      'return import("pdfjs-dist/legacy/build/pdf.mjs")'
+    )();
+  }
+
+  return pdfjsPromise;
+}
+
+/* =========================================================
+   PDFJS + CANVAS
    ========================================================= */
 
 (globalThis as any).DOMMatrix = DOMMatrix;
 (globalThis as any).Path2D = Path2D;
 (globalThis as any).ImageData = ImageData;
 
+/* =========================================================
+   EXPRESS
+   ========================================================= */
+
 const app = express();
 
 /* =========================================================
-   CONFIGURACIÓN GENERAL
+   CONFIGURACIÓN
    ========================================================= */
 
 const PORT =
@@ -47,7 +79,7 @@ const modelName =
   'gemini-3-flash-preview';
 
 const API_TOKEN =
-  process.env.API_TOKEN;
+  process.env.API_TOKEN?.trim() || '';
 
 const MAX_UPLOAD_SIZE =
   20 * 1024 * 1024;
@@ -55,10 +87,48 @@ const MAX_UPLOAD_SIZE =
 const MAX_RECEIPT_FILE_SIZE =
   MAX_UPLOAD_SIZE;
 
+const MAX_BODY_SIZE =
+  '1mb';
+
+/* =========================================================
+   MULTER
+   ========================================================= */
+
 const upload = multer({
   storage: multer.memoryStorage(),
+
   limits: {
     fileSize: MAX_UPLOAD_SIZE,
+    files: 1,
+  },
+
+  fileFilter: (
+    _req,
+    file,
+    cb
+  ) => {
+    const allowed = [
+      'application/pdf',
+      'image/png',
+      'image/jpeg',
+      'image/webp',
+      'image/gif',
+      'image/svg+xml',
+    ];
+
+    if (
+      allowed.includes(
+        file.mimetype.toLowerCase()
+      )
+    ) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          `Tipo de archivo no permitido: ${file.mimetype}`
+        )
+      );
+    }
   },
 });
 
@@ -82,25 +152,29 @@ app.use(
   })
 );
 
+/* =========================================================
+   OPTIONS
+   ========================================================= */
+
 app.options(
-  '/{*splat}',
+  '*',
   cors()
 );
 
 /* =========================================================
-   BODY PARSER
+   BODY PARSERS
    ========================================================= */
 
 app.use(
   express.json({
-    limit: '1mb',
+    limit: MAX_BODY_SIZE,
   })
 );
 
 app.use(
   express.text({
     type: ['text/plain'],
-    limit: '1mb',
+    limit: MAX_BODY_SIZE,
   })
 );
 
@@ -119,15 +193,21 @@ const apiKeys = [
   process.env.GEMINI_API_KEY_8,
   process.env.GEMINI_API_KEY_9,
   process.env.GEMINI_API_KEY_10,
-].filter(
-  (
-    key
-  ): key is string =>
-    typeof key === 'string' &&
-    key.trim().length > 0
-);
+]
+  .filter(
+    (
+      key
+    ): key is string =>
+      typeof key === 'string' &&
+      key.trim().length > 0
+  )
+  .map(
+    (key) => key.trim()
+  );
 
-if (apiKeys.length === 0) {
+if (
+  apiKeys.length === 0
+) {
   console.error(
     'ERROR: No hay ninguna GEMINI_API_KEY configurada.'
   );
@@ -138,23 +218,133 @@ if (apiKeys.length === 0) {
 }
 
 /* =========================================================
-   KEY MANAGER
+   CREAR CLIENTES GEMINI
    ========================================================= */
 
-interface KeyState {
-  ai: GoogleGenAI;
-  blockedUntil: number;
-}
-
 const keyStates: KeyState[] =
-  apiKeys.map((key) => ({
-    ai: new GoogleGenAI({
-      apiKey: key,
-    }),
-    blockedUntil: 0,
-  }));
+  apiKeys.map(
+    (
+      key,
+      index
+    ) => ({
+      ai: new GoogleGenAI({
+        apiKey: key,
+      }),
+
+      blockedUntil: 0,
+
+      keyNumber:
+        index + 1,
+    })
+  );
 
 let currentKeyIndex = 0;
+
+/* =========================================================
+   ERROR -> STRING
+   ========================================================= */
+
+function errorMessage(
+  error: unknown
+): string {
+  if (
+    error instanceof Error
+  ) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+/* =========================================================
+   DETECTAR RATE LIMIT
+   ========================================================= */
+
+function isRateLimitError(
+  error: unknown
+): boolean {
+  const message =
+    errorMessage(
+      error
+    ).toLowerCase();
+
+  return (
+    message.includes('429') ||
+    message.includes(
+      'too_many_requests'
+    ) ||
+    message.includes(
+      'ratelimiterror'
+    ) ||
+    message.includes(
+      'rate limit'
+    ) ||
+    message.includes(
+      'quota exceeded'
+    ) ||
+    message.includes(
+      'resource exhausted'
+    ) ||
+    message.includes(
+      'resource_exhausted'
+    ) ||
+    message.includes(
+      'too many requests'
+    )
+  );
+}
+
+/* =========================================================
+   RETRY AFTER
+   ========================================================= */
+
+function getRetryAfterMs(
+  error: unknown
+): number {
+  const message =
+    errorMessage(
+      error
+    );
+
+  const patterns = [
+    /retry in\s+([\d.]+)\s*s/i,
+    /retry after\s+([\d.]+)\s*s/i,
+    /retryDelay["']?\s*[:=]\s*["']?([\d.]+)s/i,
+    /seconds["']?\s*[:=]\s*["']?([\d.]+)/i,
+  ];
+
+  for (
+    const pattern of patterns
+  ) {
+    const match =
+      message.match(
+        pattern
+      );
+
+    if (match) {
+      const seconds =
+        Number.parseFloat(
+          match[1]
+        );
+
+      if (
+        Number.isFinite(
+          seconds
+        ) &&
+        seconds > 0
+      ) {
+        return Math.min(
+          Math.ceil(
+            seconds * 1000
+          ),
+          10 * 60 * 1000
+        );
+      }
+    }
+  }
+
+  return 30_000;
+}
 
 /* =========================================================
    OBTENER KEY DISPONIBLE
@@ -162,11 +352,14 @@ let currentKeyIndex = 0;
 
 function getAvailableKey():
   KeyState | null {
-  if (keyStates.length === 0) {
+  if (
+    keyStates.length === 0
+  ) {
     return null;
   }
 
-  const now = Date.now();
+  const now =
+    Date.now();
 
   for (
     let i = 0;
@@ -174,17 +367,23 @@ function getAvailableKey():
     i++
   ) {
     const index =
-      (currentKeyIndex + i) %
+      (
+        currentKeyIndex +
+        i
+      ) %
       keyStates.length;
 
     const keyState =
       keyStates[index];
 
     if (
-      keyState.blockedUntil <= now
+      keyState.blockedUntil <=
+      now
     ) {
       currentKeyIndex =
-        (index + 1) %
+        (
+          index + 1
+        ) %
         keyStates.length;
 
       return keyState;
@@ -203,82 +402,12 @@ function blockKey(
   retryAfterMs: number
 ) {
   keyState.blockedUntil =
-    Date.now() + retryAfterMs;
+    Date.now() +
+    retryAfterMs;
 }
 
 /* =========================================================
-   OBTENER RETRY-AFTER
-   ========================================================= */
-
-function getRetryAfterMs(
-  error: unknown
-): number {
-  const message =
-    error instanceof Error
-      ? error.message
-      : String(error);
-
-  const match =
-    message.match(
-      /retry in\s+([\d.]+)s/i
-    );
-
-  if (match) {
-    const seconds =
-      Number.parseFloat(
-        match[1]
-      );
-
-    if (
-      Number.isFinite(seconds) &&
-      seconds > 0
-    ) {
-      return Math.ceil(
-        seconds * 1000
-      );
-    }
-  }
-
-  return 30_000;
-}
-
-/* =========================================================
-   DETECTAR RATE LIMIT
-   ========================================================= */
-
-function isRateLimitError(
-  error: unknown
-): boolean {
-  const message =
-    error instanceof Error
-      ? error.message
-      : String(error);
-
-  const normalized =
-    message.toLowerCase();
-
-  return (
-    normalized.includes('429') ||
-    normalized.includes(
-      'too_many_requests'
-    ) ||
-    normalized.includes(
-      'ratelimiterror'
-    ) ||
-    normalized.includes(
-      'rate limit'
-    ) ||
-    normalized.includes(
-      'quota exceeded'
-    ) ||
-    normalized.includes(
-      'resource exhausted'
-    )
-  );
-}
-
-/* =========================================================
-   EJECUTAR GEMINI CON ROTACIÓN
+   GEMINI CON ROTACIÓN DE KEYS
    ========================================================= */
 
 async function runGemini<T>(
@@ -286,14 +415,19 @@ async function runGemini<T>(
     ai: GoogleGenAI
   ) => Promise<T>
 ): Promise<T> {
-  if (keyStates.length === 0) {
+  if (
+    keyStates.length === 0
+  ) {
     throw new Error(
       'No hay ninguna API key de Gemini configurada en el servidor.'
     );
   }
 
   const attemptedKeys =
-    new Set<KeyState>();
+    new Set<number>();
+
+  let lastRateLimitError:
+    unknown = null;
 
   for (
     let attempt = 0;
@@ -311,24 +445,19 @@ async function runGemini<T>(
 
     if (
       attemptedKeys.has(
-        keyState
+        keyState.keyNumber
       )
     ) {
       break;
     }
 
     attemptedKeys.add(
-      keyState
+      keyState.keyNumber
     );
-
-    const keyNumber =
-      keyStates.indexOf(
-        keyState
-      ) + 1;
 
     try {
       console.log(
-        `Gemini: usando API key ${keyNumber}`
+        `Gemini: usando API key ${keyState.keyNumber}`
       );
 
       const result =
@@ -341,31 +470,38 @@ async function runGemini<T>(
       error: unknown
     ) {
       if (
-        !isRateLimitError(error)
+        !isRateLimitError(
+          error
+        )
       ) {
         throw error;
       }
+
+      lastRateLimitError =
+        error;
 
       const retryAfterMs =
         getRetryAfterMs(
           error
         );
 
-      const retryAfterSeconds =
-        Math.ceil(
-          retryAfterMs / 1000
-        );
-
-      console.warn(
-        `Gemini: API key ${keyNumber} alcanzó el límite. ` +
-        `Bloqueando durante ${retryAfterSeconds}s.`
-      );
-
       blockKey(
         keyState,
         retryAfterMs
       );
+
+      console.warn(
+        `Gemini: API key ${keyState.keyNumber} limitada durante ${Math.ceil(
+          retryAfterMs / 1000
+        )}s.`
+      );
     }
+  }
+
+  if (
+    lastRateLimitError
+  ) {
+    throw lastRateLimitError;
   }
 
   throw new Error(
@@ -374,12 +510,12 @@ async function runGemini<T>(
 }
 
 /* =========================================================
-   NORMALIZAR BODY
+   BODY NORMALIZADO
    ========================================================= */
 
 function getRequestBody(
   req: Request
-): Record<string, any> {
+): JsonObject {
   let body: unknown =
     req.body;
 
@@ -394,7 +530,9 @@ function getRequestBody(
 
     try {
       body =
-        JSON.parse(body);
+        JSON.parse(
+          body
+        );
     } catch {
       return {};
     }
@@ -408,14 +546,11 @@ function getRequestBody(
     return {};
   }
 
-  return body as Record<
-    string,
-    any
-  >;
+  return body as JsonObject;
 }
 
 /* =========================================================
-   PARÁMETRO STRING DE EXPRESS
+   PARAM STRING
    ========================================================= */
 
 function getParamString(
@@ -440,60 +575,91 @@ function getParamString(
 }
 
 /* =========================================================
-   PARSEAR JSON DE GEMINI
+   PARSEAR JSON GEMINI
    ========================================================= */
 
 function parseGeminiJson(
   text: string
 ): any {
-  const cleaned =
-    text
-      .trim()
-      .replace(
-        /^```json\s*/i,
-        ''
-      )
-      .replace(
-        /^```\s*/i,
-        ''
-      )
-      .replace(
-        /\s*```$/i,
-        ''
-      )
-      .trim();
+  let cleaned =
+    text.trim();
+
+  cleaned =
+    cleaned.replace(
+      /^```json\s*/i,
+      ''
+    );
+
+  cleaned =
+    cleaned.replace(
+      /^```\s*/i,
+      ''
+    );
+
+  cleaned =
+    cleaned.replace(
+      /\s*```$/i,
+      ''
+    );
+
+  cleaned =
+    cleaned.trim();
 
   try {
     return JSON.parse(
       cleaned
     );
-  } catch {
-    const objectMatch =
-      cleaned.match(
-        /\{[\s\S]*\}/
+  } catch {}
+
+  const objectStart =
+    cleaned.indexOf('{');
+
+  const objectEnd =
+    cleaned.lastIndexOf('}');
+
+  if (
+    objectStart !== -1 &&
+    objectEnd > objectStart
+  ) {
+    const candidate =
+      cleaned.slice(
+        objectStart,
+        objectEnd + 1
       );
 
-    if (objectMatch) {
+    try {
       return JSON.parse(
-        objectMatch[0]
+        candidate
       );
-    }
-
-    const arrayMatch =
-      cleaned.match(
-        /\[[\s\S]*\]/
-      );
-
-    if (arrayMatch) {
-      return JSON.parse(
-        arrayMatch[0]
-      );
-    }
-
-    throw new Error(
-      'Gemini devolvió un JSON inválido.'
-    );
+    } catch {}
   }
+
+  const arrayStart =
+    cleaned.indexOf('[');
+
+  const arrayEnd =
+    cleaned.lastIndexOf(']');
+
+  if (
+    arrayStart !== -1 &&
+    arrayEnd > arrayStart
+  ) {
+    const candidate =
+      cleaned.slice(
+        arrayStart,
+        arrayEnd + 1
+      );
+
+    try {
+      return JSON.parse(
+        candidate
+      );
+    } catch {}
+  }
+
+  throw new Error(
+    'Gemini devolvió un JSON inválido.'
+  );
 }
 
 /* =========================================================
@@ -505,6 +671,11 @@ function auth(
   res: Response,
   next: NextFunction
 ) {
+  /*
+   * Si API_TOKEN no está configurado,
+   * se permite la solicitud.
+   */
+
   if (!API_TOKEN) {
     return next();
   }
@@ -513,20 +684,32 @@ function auth(
     req.headers.authorization ||
     '';
 
-  const sent =
-    req.headers[
-      'x-api-key'
-    ] ||
+  const bearerToken =
     authorization.replace(
       /^Bearer\s+/i,
       ''
-    );
+    ).trim();
+
+  const headerToken =
+    typeof req.headers[
+      'x-api-key'
+    ] === 'string'
+      ? req.headers[
+          'x-api-key'
+        ].trim()
+      : '';
+
+  const sentToken =
+    headerToken ||
+    bearerToken;
 
   if (
-    sent !== API_TOKEN
+    !sentToken ||
+    sentToken !== API_TOKEN
   ) {
     return res.status(401).json({
-      error: 'no autorizado',
+      error:
+        'no autorizado',
     });
   }
 
@@ -534,22 +717,22 @@ function auth(
 }
 
 /* =========================================================
-   GITHUB STORAGE
+   GITHUB CONFIG
    ========================================================= */
 
 function ghConfig() {
   const owner =
-    process.env.GITHUB_OWNER;
+    process.env.GITHUB_OWNER?.trim();
 
   const repo =
-    process.env.GITHUB_REPO;
+    process.env.GITHUB_REPO?.trim();
 
   const branch =
-    process.env.GITHUB_BRANCH ||
+    process.env.GITHUB_BRANCH?.trim() ||
     'main';
 
   const token =
-    process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN?.trim();
 
   if (
     !owner ||
@@ -570,13 +753,13 @@ function ghConfig() {
 }
 
 /* =========================================================
-   VALIDAR PATH DE GITHUB
+   VALIDAR PATH GITHUB
    ========================================================= */
 
 function validateGithubPath(
   path: string
 ): string {
-  const normalized =
+  let normalized =
     path
       .replace(
         /^\/+/,
@@ -587,12 +770,19 @@ function validateGithubPath(
         '/'
       );
 
+  normalized =
+    normalized.replace(
+      /\/+/g,
+      '/'
+    );
+
   if (
     !normalized ||
     normalized.includes('..') ||
     normalized.startsWith(
       '.git/'
-    )
+    ) ||
+    normalized === '.git'
   ) {
     throw new Error(
       'Ruta de archivo inválida.'
@@ -621,7 +811,7 @@ function encodePathForGithub(
 }
 
 /* =========================================================
-   PATH BASE64
+   BASE64 URL SAFE
    ========================================================= */
 
 function encodePathB64(
@@ -646,9 +836,23 @@ function encodePathB64(
     );
 }
 
+/* =========================================================
+   DECODE BASE64 URL SAFE
+   ========================================================= */
+
 function decodePathB64(
   value: string
 ): string {
+  if (
+    !/^[A-Za-z0-9_-]+$/.test(
+      value
+    )
+  ) {
+    throw new Error(
+      'pathB64 inválido.'
+    );
+  }
+
   let normalized =
     value
       .replace(
@@ -667,13 +871,16 @@ function decodePathB64(
     normalized += '=';
   }
 
-  return validateGithubPath(
+  const decoded =
     Buffer.from(
       normalized,
       'base64'
     ).toString(
       'utf8'
-    )
+    );
+
+  return validateGithubPath(
+    decoded
   );
 }
 
@@ -687,17 +894,20 @@ function githubHeaders(
   return {
     Authorization:
       `Bearer ${token}`,
+
     Accept:
       'application/vnd.github+json',
+
     'X-GitHub-Api-Version':
       '2022-11-28',
+
     'Content-Type':
       'application/json',
   };
 }
 
 /* =========================================================
-   OBTENER ARCHIVO DE GITHUB
+   GITHUB GET
    ========================================================= */
 
 async function getGithubFile(
@@ -710,20 +920,30 @@ async function getGithubFile(
     token,
   } = ghConfig();
 
-  const encodedPath =
-    encodePathForGithub(
+  const safePath =
+    validateGithubPath(
       path
     );
 
+  const encodedPath =
+    encodePathForGithub(
+      safePath
+    );
+
   const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
-    `/${encodeURIComponent(repo)}/contents/${encodedPath}` +
-    `?ref=${encodeURIComponent(branch)}`;
+    `https://api.github.com/repos/${encodeURIComponent(
+      owner
+    )}/${encodeURIComponent(
+      repo
+    )}/contents/${encodedPath}?ref=${encodeURIComponent(
+      branch
+    )}`;
 
   const response =
     await fetch(
       url,
       {
+        method: 'GET',
         headers:
           githubHeaders(
             token
@@ -731,14 +951,16 @@ async function getGithubFile(
       }
     );
 
-  if (!response.ok) {
-    if (
-      response.status ===
-      404
-    ) {
-      return null;
-    }
+  if (
+    response.status ===
+    404
+  ) {
+    return null;
+  }
 
+  if (
+    !response.ok
+  ) {
     const text =
       await response.text();
 
@@ -751,7 +973,7 @@ async function getGithubFile(
 }
 
 /* =========================================================
-   SUBIR ARCHIVO A GITHUB
+   GITHUB UPLOAD
    ========================================================= */
 
 async function uploadToGithub(
@@ -785,19 +1007,23 @@ async function uploadToGithub(
     );
 
   const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
-    `/${encodeURIComponent(repo)}/contents/${encodePathForGithub(safePath)}`;
+    `https://api.github.com/repos/${encodeURIComponent(
+      owner
+    )}/${encodeURIComponent(
+      repo
+    )}/contents/${encodePathForGithub(
+      safePath
+    )}`;
 
-  const body: Record<
-    string,
-    any
-  > = {
+  const body: JsonObject = {
     message:
       `Torchill receipt upload: ${safePath}`,
+
     content:
       data.toString(
         'base64'
       ),
+
     branch,
   };
 
@@ -815,10 +1041,12 @@ async function uploadToGithub(
       url,
       {
         method: 'PUT',
+
         headers:
           githubHeaders(
             token
           ),
+
         body:
           JSON.stringify(
             body
@@ -826,7 +1054,9 @@ async function uploadToGithub(
       }
     );
 
-  if (!response.ok) {
+  if (
+    !response.ok
+  ) {
     const text =
       await response.text();
 
@@ -840,12 +1070,17 @@ async function uploadToGithub(
 
   return {
     path: safePath,
+
     sha:
       result.content?.sha ||
       null,
+
     branch,
+
     owner,
+
     repo,
+
     pathB64:
       encodePathB64(
         safePath
@@ -854,7 +1089,7 @@ async function uploadToGithub(
 }
 
 /* =========================================================
-   MIME TYPE
+   MIME
    ========================================================= */
 
 function mimeForPath(
@@ -904,7 +1139,7 @@ function mimeForPath(
 }
 
 /* =========================================================
-   MIME TYPE DESDE URL / HEADER
+   MIME DESDE URL
    ========================================================= */
 
 function getMimeType(
@@ -927,7 +1162,9 @@ function getMimeType(
 
   try {
     const parsed =
-      new URL(fileUrl);
+      new URL(
+        fileUrl
+      );
 
     return mimeForPath(
       parsed.pathname
@@ -938,15 +1175,12 @@ function getMimeType(
 }
 
 /* =========================================================
-   DESCARGAR ARCHIVO DESDE GITHUB
+   DESCARGAR ARCHIVO GITHUB
    ========================================================= */
 
 async function downloadGithubFile(
   path: string
-): Promise<{
-  buffer: Buffer;
-  mimeType: string;
-}> {
+): Promise<DownloadedFile> {
   const {
     owner,
     repo,
@@ -965,9 +1199,13 @@ async function downloadGithubFile(
     );
 
   const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
-    `/${encodeURIComponent(repo)}/contents/${encodedPath}` +
-    `?ref=${encodeURIComponent(branch)}`;
+    `https://api.github.com/repos/${encodeURIComponent(
+      owner
+    )}/${encodeURIComponent(
+      repo
+    )}/contents/${encodedPath}?ref=${encodeURIComponent(
+      branch
+    )}`;
 
   const response =
     await fetch(
@@ -980,16 +1218,18 @@ async function downloadGithubFile(
       }
     );
 
-  if (!response.ok) {
-    if (
-      response.status ===
-      404
-    ) {
-      throw new Error(
-        'Archivo no encontrado en GitHub.'
-      );
-    }
+  if (
+    response.status ===
+    404
+  ) {
+    throw new Error(
+      'Archivo no encontrado en GitHub.'
+    );
+  }
 
+  if (
+    !response.ok
+  ) {
     const text =
       await response.text();
 
@@ -1002,8 +1242,7 @@ async function downloadGithubFile(
     await response.json();
 
   if (
-    result.type !==
-      'file' ||
+    result.type !== 'file' ||
     typeof result.content !==
       'string'
   ) {
@@ -1035,6 +1274,7 @@ async function downloadGithubFile(
 
   return {
     buffer,
+
     mimeType:
       mimeForPath(
         safePath
@@ -1049,14 +1289,24 @@ async function downloadGithubFile(
 async function pdfFirstPageToPng(
   buffer: Buffer
 ): Promise<Buffer> {
+  const pdfjsLib =
+    await getPdfJs();
+
   const loadingTask =
     pdfjsLib.getDocument({
       data:
         new Uint8Array(
           buffer
         ),
-      isEvalSupported: false,
-      useSystemFonts: false,
+
+      isEvalSupported:
+        false,
+
+      useSystemFonts:
+        true,
+
+      disableFontFace:
+        false,
     });
 
   const pdf =
@@ -1074,20 +1324,21 @@ async function pdfFirstPageToPng(
     const page =
       await pdf.getPage(1);
 
-    const base =
+    const baseViewport =
       page.getViewport({
         scale: 1,
       });
 
-    const maxSide = 1600;
+    const maxSide =
+      1600;
 
     const scale =
       Math.min(
         2,
         maxSide /
           Math.max(
-            base.width,
-            base.height
+            baseViewport.width,
+            baseViewport.height
           )
       );
 
@@ -1096,14 +1347,26 @@ async function pdfFirstPageToPng(
         scale,
       });
 
-    const canvas =
-      createCanvas(
+    const width =
+      Math.max(
+        1,
         Math.ceil(
           viewport.width
-        ),
+        )
+      );
+
+    const height =
+      Math.max(
+        1,
         Math.ceil(
           viewport.height
         )
+      );
+
+    const canvas =
+      createCanvas(
+        width,
+        height
       );
 
     const context =
@@ -1111,30 +1374,36 @@ async function pdfFirstPageToPng(
         '2d'
       );
 
+    context.imageSmoothingEnabled =
+      true;
+
     await page.render({
       canvasContext:
         context as any,
+
       viewport,
+
+      intent:
+        'display',
     }).promise;
 
     return canvas.toBuffer(
       'image/png'
     );
   } finally {
-    await pdf.destroy();
+    try {
+      await pdf.destroy();
+    } catch {}
   }
 }
 
 /* =========================================================
-   DESCARGAR RECEIPT
+   DESCARGAR RECEIPT EXTERNO
    ========================================================= */
 
 async function downloadReceipt(
   fileUrl: string
-): Promise<{
-  buffer: Buffer;
-  mimeType: string;
-}> {
+): Promise<DownloadedFile> {
   let parsedUrl: URL;
 
   try {
@@ -1161,10 +1430,15 @@ async function downloadReceipt(
 
   const fileRes =
     await fetch(
-      fileUrl
+      parsedUrl,
+      {
+        redirect: 'follow',
+      }
     );
 
-  if (!fileRes.ok) {
+  if (
+    !fileRes.ok
+  ) {
     throw new Error(
       `No se pudo descargar el archivo (${fileRes.status}).`
     );
@@ -1185,7 +1459,9 @@ async function downloadReceipt(
     );
   }
 
-  if (!fileRes.body) {
+  if (
+    !fileRes.body
+  ) {
     throw new Error(
       'La respuesta no contiene datos.'
     );
@@ -1194,7 +1470,7 @@ async function downloadReceipt(
   const reader =
     fileRes.body.getReader();
 
-  const chunks: Uint8Array[] =
+  const chunks: Buffer[] =
     [];
 
   let total = 0;
@@ -1204,13 +1480,17 @@ async function downloadReceipt(
       const {
         done,
         value,
-      } = await reader.read();
+      } =
+        await reader.read();
 
       if (done) {
         break;
       }
 
-      if (value) {
+      if (
+        value &&
+        value.length > 0
+      ) {
         total +=
           value.length;
 
@@ -1228,37 +1508,104 @@ async function downloadReceipt(
         }
 
         chunks.push(
-          value
+          Buffer.from(
+            value
+          )
         );
       }
     }
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {}
   }
 
   const buffer =
     Buffer.concat(
-      chunks.map(
-        (chunk) =>
-          Buffer.from(
-            chunk
-          )
-      )
-    );
-
-  const mimeType =
-    getMimeType(
-      fileUrl,
-      fileRes.headers.get(
-        'content-type'
-      ) || ''
+      chunks
     );
 
   return {
     buffer,
-    mimeType,
+
+    mimeType:
+      getMimeType(
+        fileUrl,
+        fileRes.headers.get(
+          'content-type'
+        ) || ''
+      ),
   };
 }
+
+/* =========================================================
+   HEALTH
+   ========================================================= */
+
+app.get(
+  '/health',
+  (
+    _req: Request,
+    res: Response
+  ) => {
+    return res.status(200).json({
+      ok: true,
+
+      service:
+        'torchill-api',
+
+      model:
+        modelName,
+
+      gemini:
+        apiKeys.length > 0,
+
+      geminiConfigured:
+        apiKeys.length > 0,
+
+      geminiKeys:
+        apiKeys.length,
+
+      githubConfigured:
+        Boolean(
+          process.env.GITHUB_OWNER &&
+          process.env.GITHUB_REPO &&
+          process.env.GITHUB_TOKEN
+        ),
+    });
+  }
+);
+
+/* =========================================================
+   PROJECT COPY HEALTH
+   ========================================================= */
+
+app.get(
+  '/api/gemini/project-copy',
+  (
+    _req: Request,
+    res: Response
+  ) => {
+    return res.status(200).json({
+      status: 'ok',
+
+      service:
+        'torchill-api',
+
+      model:
+        modelName,
+
+      geminiConfigured:
+        apiKeys.length > 0,
+
+      geminiKeys:
+        apiKeys.length,
+
+      message:
+        'Torchill API funcionando correctamente.',
+    });
+  }
+);
 
 /* =========================================================
    GET RECEIPT
@@ -1324,76 +1671,16 @@ app.get(
         error
       );
 
-      const message =
-        error instanceof Error
-          ? error.message
-          : String(error);
-
       return res.status(404).json({
         error:
           'No se pudo obtener el archivo.',
+
         details:
-          message,
+          errorMessage(
+            error
+          ),
       });
     }
-  }
-);
-
-/* =========================================================
-   HEALTH CHECK
-   ========================================================= */
-
-app.get(
-  '/health',
-  (
-    _req: Request,
-    res: Response
-  ) => {
-    return res.status(200).json({
-      ok: true,
-      service:
-        'torchill-api',
-      model:
-        modelName,
-      gemini:
-        apiKeys.length > 0,
-      geminiConfigured:
-        apiKeys.length > 0,
-      geminiKeys:
-        apiKeys.length,
-      githubConfigured:
-        Boolean(
-          process.env.GITHUB_OWNER &&
-          process.env.GITHUB_REPO &&
-          process.env.GITHUB_TOKEN
-        ),
-    });
-  }
-);
-
-/* =========================================================
-   HEALTH CHECK PROJECT COPY
-   ========================================================= */
-
-app.get(
-  '/api/gemini/project-copy',
-  (
-    _req: Request,
-    res: Response
-  ) => {
-    return res.status(200).json({
-      status: 'ok',
-      service:
-        'torchill-api',
-      model:
-        modelName,
-      geminiConfigured:
-        apiKeys.length > 0,
-      geminiKeys:
-        apiKeys.length,
-      message:
-        'Torchill API funcionando correctamente.',
-    });
   }
 );
 
@@ -1410,50 +1697,76 @@ app.post(
     res: Response
   ) => {
     try {
-      let buffer: Buffer | null =
-        req.file?.buffer || null;
+      let buffer:
+        | Buffer
+        | null =
+        req.file?.buffer ||
+        null;
 
       let originalName =
-        req.file?.originalname || '';
+        req.file?.originalname ||
+        '';
 
       let mimeType =
-        req.file?.mimetype || '';
+        req.file?.mimetype ||
+        '';
 
       const body =
-        getRequestBody(req);
+        getRequestBody(
+          req
+        );
+
+      /* =====================================================
+         BASE64 FALLBACK
+         ===================================================== */
 
       if (!buffer) {
         const dataBase64 =
-          typeof body.dataBase64 === 'string'
-            ? body.dataBase64
+          typeof body.dataBase64 ===
+          'string'
+            ? body.dataBase64.trim()
             : '';
 
-        if (dataBase64) {
+        if (
+          dataBase64
+        ) {
           const clean =
             dataBase64.replace(
               /^data:[^;]+;base64,/i,
               ''
             );
 
-          buffer =
-            Buffer.from(
-              clean,
-              'base64'
-            );
+          try {
+            buffer =
+              Buffer.from(
+                clean,
+                'base64'
+              );
+          } catch {
+            return res.status(400).json({
+              error:
+                'dataBase64 inválido.',
+            });
+          }
 
           originalName =
-            typeof body.fileName === 'string'
+            typeof body.fileName ===
+            'string'
               ? body.fileName
-              : typeof body.filename === 'string'
+              : typeof body.filename ===
+                'string'
                 ? body.filename
                 : 'receipt';
 
           mimeType =
-            typeof body.mimeType === 'string'
+            typeof body.mimeType ===
+            'string'
               ? body.mimeType
-              : typeof body.mime === 'string'
+              : typeof body.mime ===
+                'string'
                 ? body.mime
-                : typeof body.contentType === 'string'
+                : typeof body.contentType ===
+                  'string'
                   ? body.contentType
                   : '';
         }
@@ -1477,14 +1790,18 @@ app.post(
       }
 
       /* =====================================================
-         DETERMINAR TIPO REAL
+         DETECTAR EXTENSIÓN
          ===================================================== */
 
       const requestedExt =
-        typeof body.ext === 'string'
+        typeof body.ext ===
+        'string'
           ? body.ext
               .trim()
-              .replace(/^\./, '')
+              .replace(
+                /^\./,
+                ''
+              )
               .toLowerCase()
           : '';
 
@@ -1494,35 +1811,47 @@ app.post(
           .trim()
           .toLowerCase();
 
-      let finalExtension = '';
+      let finalExtension =
+        '';
 
       if (
         normalizedMime ===
         'application/pdf'
       ) {
-        finalExtension = 'pdf';
+        finalExtension =
+          'pdf';
       } else if (
         normalizedMime ===
         'image/png'
       ) {
-        finalExtension = 'png';
+        finalExtension =
+          'png';
       } else if (
         normalizedMime ===
         'image/webp'
       ) {
-        finalExtension = 'webp';
+        finalExtension =
+          'webp';
       } else if (
         normalizedMime ===
         'image/gif'
       ) {
-        finalExtension = 'gif';
+        finalExtension =
+          'gif';
       } else if (
         normalizedMime ===
           'image/jpeg' ||
         normalizedMime ===
           'image/jpg'
       ) {
-        finalExtension = 'jpg';
+        finalExtension =
+          'jpg';
+      } else if (
+        normalizedMime ===
+        'image/svg+xml'
+      ) {
+        finalExtension =
+          'svg';
       } else if (
         requestedExt
       ) {
@@ -1535,45 +1864,64 @@ app.post(
           originalName
             .split('.')
             .pop()
-            ?.toLowerCase() || '';
+            ?.toLowerCase() ||
+          '';
       }
 
-      /*
-       * Detectar PDF por bytes.
-       */
+      /* =====================================================
+         DETECTAR PDF REAL POR BYTES
+         ===================================================== */
 
-      if (
+      const isPdf =
         buffer.length >= 5 &&
         buffer
-          .subarray(0, 5)
-          .toString('ascii') ===
-          '%PDF-'
-      ) {
-        finalExtension = 'pdf';
+          .subarray(
+            0,
+            5
+          )
+          .toString(
+            'ascii'
+          ) ===
+          '%PDF-';
+
+      if (isPdf) {
+        finalExtension =
+          'pdf';
+
         mimeType =
           'application/pdf';
       }
 
-      if (!finalExtension) {
-        finalExtension = 'jpg';
-      }
-
       /* =====================================================
-         NORMALIZAR EXTENSIONES
+         NORMALIZAR EXTENSION
          ===================================================== */
 
       if (
         finalExtension ===
-        'jpeg'
+          'jpeg' ||
+        finalExtension ===
+          'jpe'
       ) {
-        finalExtension = 'jpg';
+        finalExtension =
+          'jpg';
       }
 
+      const allowedExtensions = [
+        'pdf',
+        'png',
+        'jpg',
+        'webp',
+        'gif',
+        'svg',
+      ];
+
       if (
-        finalExtension ===
-        'jpe'
+        !allowedExtensions.includes(
+          finalExtension
+        )
       ) {
-        finalExtension = 'jpg';
+        finalExtension =
+          'jpg';
       }
 
       /* =====================================================
@@ -1591,30 +1939,10 @@ app.post(
       ) {
         mimeType =
           finalMimeType;
-      } else if (
-        !mimeType
-      ) {
-        mimeType =
-          'application/octet-stream';
       }
 
       /* =====================================================
-         NOMBRE SEGURO
-         ===================================================== */
-
-      const safeName =
-        String(
-          originalName ||
-            `receipt.${finalExtension}`
-        ).replace(
-          /[^a-zA-Z0-9._-]/g,
-          '_'
-        );
-
-      void safeName;
-
-      /* =====================================================
-         PATH DE GITHUB
+         PATH GITHUB
          ===================================================== */
 
       let requestedPath =
@@ -1623,16 +1951,25 @@ app.post(
           ? body.path.trim()
           : '';
 
-      if (!requestedPath) {
+      if (
+        !requestedPath
+      ) {
         requestedPath =
           `receipts/${Date.now()}-${crypto.randomUUID()}.${finalExtension}`;
       } else {
-        const pathHasExtension =
+        requestedPath =
+          validateGithubPath(
+            requestedPath
+          );
+
+        const hasExtension =
           /\.[a-zA-Z0-9]+$/.test(
             requestedPath
           );
 
-        if (!pathHasExtension) {
+        if (
+          !hasExtension
+        ) {
           requestedPath =
             `${requestedPath}.${finalExtension}`;
         } else {
@@ -1653,26 +1990,21 @@ app.post(
         'Upload:',
         JSON.stringify({
           originalName,
-          requestedExt,
-          originalMime: mimeType,
+          originalMime:
+            mimeType,
           finalExtension,
           finalMimeType,
-          size: buffer.length,
-          path: requestedPath,
+          size:
+            buffer.length,
+          path:
+            requestedPath,
           pdfDetected:
-            buffer
-              .subarray(
-                0,
-                5
-              )
-              .toString(
-                'ascii'
-              ) === '%PDF-',
+            isPdf,
         })
       );
 
       /* =====================================================
-         SUBIR A GITHUB
+         GITHUB
          ===================================================== */
 
       const result =
@@ -1682,31 +2014,42 @@ app.post(
         );
 
       /* =====================================================
-         URL DEL RECEIPT
+         URL
          ===================================================== */
 
       const receiptUrl =
         `/receipt/${result.pathB64}`;
 
+      const host =
+        req.get('host');
+
       const absoluteUrl =
-        `${req.protocol}://${req.get('host')}${receiptUrl}`;
+        host
+          ? `${req.protocol}://${host}${receiptUrl}`
+          : receiptUrl;
 
       /* =====================================================
-         RESPUESTA
+         RESPONSE
          ===================================================== */
 
       return res.status(200).json({
         ok: true,
+
         ...result,
+
         mimeType:
           mimeForPath(
             result.path
           ),
+
         size:
           buffer.length,
+
         url:
           receiptUrl,
+
         receiptUrl,
+
         absoluteUrl,
       });
     } catch (
@@ -1718,13 +2061,25 @@ app.post(
       );
 
       const message =
-        error instanceof Error
-          ? error.message
-          : String(error);
+        errorMessage(
+          error
+        );
+
+      if (
+        message.includes(
+          'File too large'
+        )
+      ) {
+        return res.status(413).json({
+          error:
+            'El archivo supera el límite máximo de 20 MB.',
+        });
+      }
 
       return res.status(500).json({
         error:
           'No se pudo subir el archivo.',
+
         details:
           message,
       });
@@ -1744,7 +2099,8 @@ app.post(
   ) => {
     try {
       if (
-        apiKeys.length === 0
+        apiKeys.length ===
+        0
       ) {
         return res.status(503).json({
           error:
@@ -1753,7 +2109,9 @@ app.post(
       }
 
       const body =
-        getRequestBody(req);
+        getRequestBody(
+          req
+        );
 
       const {
         action,
@@ -1764,19 +2122,18 @@ app.post(
       } = body;
 
       if (
-        Object.keys(body).length ===
-        0
+        Object.keys(
+          body
+        ).length === 0
       ) {
         return res.status(400).json({
           error:
             'La solicitud no contiene un body JSON válido.',
-          expected:
-            'Para proyectos: {"title":"...","text":"..."}',
         });
       }
 
       /* =====================================================
-         TRADUCCIÓN
+         TRANSLATE
          ===================================================== */
 
       if (
@@ -1795,8 +2152,7 @@ app.post(
         }
 
         if (
-          segments.length ===
-          0
+          segments.length === 0
         ) {
           return res.status(400).json({
             error:
@@ -1807,7 +2163,15 @@ app.post(
         const targetLanguage =
           language === 'en'
             ? 'inglés'
-            : 'español';
+            : language === 'zh'
+              ? 'chino'
+              : language === 'pt'
+                ? 'portugués'
+                : language === 'fr'
+                  ? 'francés'
+                  : language === 'it'
+                    ? 'italiano'
+                    : 'español';
 
         const prompt = `
 Actúa como traductor profesional especializado
@@ -1815,26 +2179,23 @@ en diseño gráfico y comunicación visual.
 
 Traduce los siguientes textos al ${targetLanguage}.
 
-Reglas:
+REGLAS:
 - Mantén exactamente el significado.
 - No inventes información.
 - No elimines información.
-- Conserva el orden de los textos.
-- Mantén un tono profesional.
+- Conserva el orden.
+- Mantén el tono profesional.
 - La traducción debe sonar natural.
 - No agregues explicaciones.
+- Devuelve un elemento por cada texto recibido.
 
-Textos:
+TEXTOS:
 
 ${JSON.stringify(
   segments
 )}
 
-Devuelve exclusivamente un JSON válido con esta estructura:
-
-{
-  "translations": ["texto traducido 1", "texto traducido 2"]
-}
+Devuelve exclusivamente JSON válido.
 `;
 
         const interaction =
@@ -1844,36 +2205,51 @@ Devuelve exclusivamente un JSON válido con esta estructura:
                 {
                   model:
                     modelName,
+
                   input:
                     prompt,
-                  response_format: {
-                    type: 'text',
-                    mime_type:
-                      'application/json',
-                    schema: {
-                      type: 'object',
-                      properties: {
-                        translations:
-                          {
-                            type: 'array',
-                            items: {
-                              type: 'string',
+
+                  response_format:
+                    {
+                      type:
+                        'text',
+
+                      mime_type:
+                        'application/json',
+
+                      schema: {
+                        type:
+                          'object',
+
+                        properties: {
+                          translations:
+                            {
+                              type:
+                                'array',
+
+                              items: {
+                                type:
+                                  'string',
+                              },
                             },
-                          },
+                        },
+
+                        required: [
+                          'translations',
+                        ],
                       },
-                      required: [
-                        'translations',
-                      ],
                     },
-                  },
-                }
+                } as any
               )
           );
 
         const output =
-          interaction.output_text?.trim();
+          interaction.output_text
+            ?.trim();
 
-        if (!output) {
+        if (
+          !output
+        ) {
           throw new Error(
             'Gemini devolvió una respuesta vacía.'
           );
@@ -1890,7 +2266,7 @@ Devuelve exclusivamente un JSON válido con esta estructura:
       }
 
       /* =====================================================
-         PROYECTO / PORTFOLIO
+         PROJECT / PORTFOLIO
          ===================================================== */
 
       if (
@@ -1922,38 +2298,24 @@ Actúa como director de arte y editor
 especializado en portfolios profesionales
 de diseño gráfico.
 
-Proyecto:
-
+PROYECTO:
 ${title}
 
-Texto original:
-
+TEXTO ORIGINAL:
 ${text}
 
-Objetivos:
-- Mejorar la claridad.
-- Mejorar la redacción.
-- Mantener la intención original.
+OBJETIVOS:
+- Mejorar claridad.
+- Mejorar redacción.
+- Mantener intención original.
 - Utilizar lenguaje profesional.
 - Evitar frases publicitarias genéricas.
 - No inventar información.
 - No agregar datos inexistentes.
 - Mantener el contenido apropiado
-  para un portfolio de diseño.
+  para un portfolio profesional.
 
-Devuelve exclusivamente JSON válido con esta estructura:
-
-{
-  "lead": "string",
-  "discipline": "string",
-  "sections": [
-    {
-      "title": "string",
-      "summary": "string"
-    }
-  ],
-  "imageAlts": ["string"]
-}
+Devuelve exclusivamente JSON válido.
 `;
 
       const interaction =
@@ -1963,55 +2325,80 @@ Devuelve exclusivamente JSON válido con esta estructura:
               {
                 model:
                   modelName,
+
                 input:
                   prompt,
-                response_format: {
-                  type: 'text',
-                  mime_type:
-                    'application/json',
-                  schema: {
-                    type: 'object',
-                    properties: {
-                      lead: {
-                        type: 'string',
-                      },
-                      discipline: {
-                        type: 'string',
-                      },
-                      sections: {
-                        type: 'array',
-                        items: {
-                          type: 'object',
-                          properties: {
-                            title: {
-                              type: 'string',
+
+                response_format:
+                  {
+                    type:
+                      'text',
+
+                    mime_type:
+                      'application/json',
+
+                    schema: {
+                      type:
+                        'object',
+
+                      properties: {
+                        lead: {
+                          type:
+                            'string',
+                        },
+
+                        discipline: {
+                          type:
+                            'string',
+                        },
+
+                        sections: {
+                          type:
+                            'array',
+
+                          items: {
+                            type:
+                              'object',
+
+                            properties: {
+                              title: {
+                                type:
+                                  'string',
+                              },
+
+                              summary: {
+                                type:
+                                  'string',
+                              },
                             },
-                            summary: {
-                              type: 'string',
-                            },
+
+                            required: [
+                              'title',
+                              'summary',
+                            ],
                           },
-                          required: [
-                            'title',
-                            'summary',
-                          ],
+                        },
+
+                        imageAlts: {
+                          type:
+                            'array',
+
+                          items: {
+                            type:
+                              'string',
+                          },
                         },
                       },
-                      imageAlts: {
-                        type: 'array',
-                        items: {
-                          type: 'string',
-                        },
-                      },
+
+                      required: [
+                        'lead',
+                        'discipline',
+                        'sections',
+                        'imageAlts',
+                      ],
                     },
-                    required: [
-                      'lead',
-                      'discipline',
-                      'sections',
-                      'imageAlts',
-                    ],
                   },
-                },
-              }
+              } as any
             )
         );
 
@@ -2019,7 +2406,9 @@ Devuelve exclusivamente JSON válido con esta estructura:
         interaction.output_text
           ?.trim();
 
-      if (!output) {
+      if (
+        !output
+      ) {
         throw new Error(
           'Gemini devolvió una respuesta vacía.'
         );
@@ -2049,20 +2438,20 @@ Devuelve exclusivamente JSON válido con esta estructura:
         return res.status(429).json({
           error:
             'Todas las API keys de Gemini están temporalmente limitadas.',
-          retryable: true,
+
+          retryable:
+            true,
         });
       }
-
-      const message =
-        error instanceof Error
-          ? error.message
-          : String(error);
 
       return res.status(500).json({
         error:
           'Error procesando la solicitud con Gemini.',
+
         details:
-          message,
+          errorMessage(
+            error
+          ),
       });
     }
   }
@@ -2091,7 +2480,9 @@ app.post(
       }
 
       const body =
-        getRequestBody(req);
+        getRequestBody(
+          req
+        );
 
       const {
         fileUrl,
@@ -2122,29 +2513,53 @@ app.post(
         });
       }
 
-      /* ===================================================
-         1. DESCARGAR ARCHIVO
-         =================================================== */
+      /* =====================================================
+         DESCARGAR
+         ===================================================== */
 
       let {
         buffer,
         mimeType,
       } =
         await downloadReceipt(
-          fileUrl
+          fileUrl.trim()
         );
 
       console.log(
         `Receipt: archivo descargado (${buffer.length} bytes, ${mimeType})`
       );
 
-      /* ===================================================
-         2. PDF -> PNG
-         =================================================== */
+      /* =====================================================
+         DETECTAR PDF POR BYTES
+         ===================================================== */
+
+      const looksLikePdf =
+        buffer.length >= 5 &&
+        buffer
+          .subarray(
+            0,
+            5
+          )
+          .toString(
+            'ascii'
+          ) ===
+          '%PDF-';
+
+      if (
+        looksLikePdf
+      ) {
+        mimeType =
+          'application/pdf';
+      }
+
+      /* =====================================================
+         PDF -> PNG
+         ===================================================== */
 
       if (
         mimeType ===
-        'application/pdf'
+          'application/pdf' ||
+        looksLikePdf
       ) {
         console.log(
           'Receipt: PDF detectado. Convirtiendo primera página a PNG...'
@@ -2156,7 +2571,9 @@ app.post(
               buffer
             );
 
-          buffer = png;
+          buffer =
+            png;
+
           mimeType =
             'image/png';
 
@@ -2164,7 +2581,7 @@ app.post(
             `Receipt: PDF convertido a PNG (${buffer.length} bytes)`
           );
         } catch (
-          pdfError
+          pdfError: unknown
         ) {
           console.error(
             'Receipt PDF conversion error:',
@@ -2174,34 +2591,61 @@ app.post(
           return res.status(422).json({
             error:
               'No se pudo convertir el PDF a imagen.',
+
             details:
-              pdfError instanceof Error
-                ? pdfError.message
-                : String(
-                    pdfError
-                  ),
+              errorMessage(
+                pdfError
+              ),
           });
         }
       }
+
+      /* =====================================================
+         VALIDAR MIME FINAL
+         ===================================================== */
+
+      const supportedMimeTypes = [
+        'image/png',
+        'image/jpeg',
+        'image/webp',
+        'image/gif',
+      ];
+
+      if (
+        !supportedMimeTypes.includes(
+          mimeType
+        )
+      ) {
+        return res.status(415).json({
+          error:
+            `Tipo de archivo no soportado para análisis: ${mimeType}`,
+        });
+      }
+
+      /* =====================================================
+         BASE64
+         ===================================================== */
 
       const base64 =
         buffer.toString(
           'base64'
         );
 
-      /* ===================================================
-         3. ANALIZAR CON GEMINI
-         =================================================== */
+      /* =====================================================
+         GEMINI
+         ===================================================== */
 
       const geminiPrompt = `
 ${prompt}
 
-IMPORTANTE:
+INSTRUCCIONES IMPORTANTES:
 - Analiza cuidadosamente el comprobante.
 - Extrae únicamente información visible o claramente inferible.
 - No inventes datos.
 - Si un campo no puede determinarse, utiliza null.
-- Devuelve ÚNICAMENTE JSON válido.
+- Devuelve exclusivamente JSON válido.
+- No incluyas markdown.
+- No incluyas explicaciones fuera del JSON.
 `;
 
       const response =
@@ -2211,14 +2655,18 @@ IMPORTANTE:
               {
                 model:
                   modelName,
+
                 contents: [
                   {
-                    role: 'user',
+                    role:
+                      'user',
+
                     parts: [
                       {
                         text:
                           geminiPrompt,
                       },
+
                       {
                         inlineData:
                           {
@@ -2230,39 +2678,47 @@ IMPORTANTE:
                     ],
                   },
                 ],
+
                 config: {
                   responseMimeType:
                     'application/json',
-                  temperature: 0.1,
+
+                  temperature:
+                    0.1,
                 },
               }
             )
         );
 
-      const text =
+      const outputText =
         response.text?.trim() ||
         '';
 
-      if (!text) {
+      if (
+        !outputText
+      ) {
         throw new Error(
           'Gemini devolvió una respuesta vacía.'
         );
       }
 
-      /* ===================================================
-         4. PARSEAR JSON
-         =================================================== */
+      /* =====================================================
+         JSON
+         ===================================================== */
 
       const parsed =
         parseGeminiJson(
-          text
+          outputText
         );
 
       return res.status(200).json({
         ok: true,
+
         detected:
           parsed,
-        raw: text,
+
+        raw:
+          outputText,
       });
     } catch (
       error: unknown
@@ -2280,22 +2736,70 @@ IMPORTANTE:
         return res.status(429).json({
           error:
             'Todas las API keys de Gemini están temporalmente limitadas.',
-          retryable: true,
+
+          retryable:
+            true,
         });
       }
-
-      const message =
-        error instanceof Error
-          ? error.message
-          : String(error);
 
       return res.status(500).json({
         error:
           'Error analizando el comprobante.',
+
         details:
-          message,
+          errorMessage(
+            error
+          ),
       });
     }
+  }
+);
+
+/* =========================================================
+   MULTER ERROR HANDLER
+   ========================================================= */
+
+app.use(
+  (
+    error: any,
+    _req: Request,
+    res: Response,
+    next: NextFunction
+  ) => {
+    if (
+      error instanceof multer.MulterError
+    ) {
+      if (
+        error.code ===
+        'LIMIT_FILE_SIZE'
+      ) {
+        return res.status(413).json({
+          error:
+            'El archivo supera el límite máximo de 20 MB.',
+        });
+      }
+
+      return res.status(400).json({
+        error:
+          `Error de subida: ${error.message}`,
+      });
+    }
+
+    if (
+      error instanceof Error &&
+      error.message.includes(
+        'Tipo de archivo no permitido'
+      )
+    ) {
+      return res.status(415).json({
+        error:
+          error.message,
+      });
+    }
+
+    return next(
+      error
+    );
   }
 );
 
@@ -2316,6 +2820,34 @@ app.use(
 );
 
 /* =========================================================
+   ERROR GLOBAL
+   ========================================================= */
+
+app.use(
+  (
+    error: unknown,
+    _req: Request,
+    res: Response,
+    _next: NextFunction
+  ) => {
+    console.error(
+      'Unhandled server error:',
+      error
+    );
+
+    return res.status(500).json({
+      error:
+        'Error interno del servidor.',
+
+      details:
+        errorMessage(
+          error
+        ),
+    });
+  }
+);
+
+/* =========================================================
    START
    ========================================================= */
 
@@ -2323,7 +2855,23 @@ app.listen(
   PORT,
   () => {
     console.log(
-      `Servidor corriendo en puerto ${PORT}`
+      '=========================================='
+    );
+
+    console.log(
+      'TORCHILL API'
+    );
+
+    console.log(
+      '=========================================='
+    );
+
+    console.log(
+      `Servidor: http://localhost:${PORT}`
+    );
+
+    console.log(
+      `Puerto: ${PORT}`
     );
 
     console.log(
@@ -2331,19 +2879,45 @@ app.listen(
     );
 
     console.log(
-      `Gemini API keys disponibles: ${apiKeys.length}`
+      `Gemini API keys: ${apiKeys.length}`
     );
 
     console.log(
-      `Analyze receipt: /analyze-receipt`
+      `GitHub configurado: ${
+        Boolean(
+          process.env.GITHUB_OWNER &&
+          process.env.GITHUB_REPO &&
+          process.env.GITHUB_TOKEN
+        )
+      }`
     );
 
     console.log(
-      `Upload: /upload`
+      '------------------------------------------'
     );
 
     console.log(
-      `Receipt: /receipt/:pathB64`
+      'GET  /health'
+    );
+
+    console.log(
+      'GET  /receipt/:pathB64'
+    );
+
+    console.log(
+      'POST /upload'
+    );
+
+    console.log(
+      'POST /analyze-receipt'
+    );
+
+    console.log(
+      'POST /api/gemini/project-copy'
+    );
+
+    console.log(
+      '=========================================='
     );
   }
 );
