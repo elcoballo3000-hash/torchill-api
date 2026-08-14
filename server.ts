@@ -15,6 +15,27 @@ import {
 } from '@napi-rs/canvas';
 
 import crypto from 'node:crypto';
+
+import {
+  DOMMatrix,
+  Path2D,
+  ImageData,
+} from '@napi-rs/canvas';
+
+(globalThis as any).DOMMatrix =
+  DOMMatrix;
+
+(globalThis as any).Path2D =
+  Path2D;
+
+(globalThis as any).ImageData =
+  ImageData;
+
+import {
+  createCanvas,
+} from '@napi-rs/canvas';
+
+import crypto from 'node:crypto';
 /* =========================================================
    PDFJS + @napi-rs/canvas
    ========================================================= */
