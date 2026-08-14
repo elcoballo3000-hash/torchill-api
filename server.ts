@@ -1,9 +1,22 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, {
+  Request,
+  Response,
+} from 'express';
+
 import cors from 'cors';
-import { GoogleGenAI } from '@google/genai';
+
+import {
+  GoogleGenAI,
+} from '@google/genai';
+
 import multer from 'multer';
+
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
-import { createCanvas } from '@napi-rs/canvas';
+
+import {
+  createCanvas,
+} from '@napi-rs/canvas';
+
 import crypto from 'node:crypto';
 
 const app = express();
