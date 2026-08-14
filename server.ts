@@ -1,7 +1,4 @@
-import express, {
-  Request,
-  Response,
-} from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 
 import cors from 'cors';
 
