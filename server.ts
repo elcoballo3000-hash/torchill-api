@@ -22,7 +22,14 @@ const API_TOKEN = process.env.API_TOKEN;
  * Tamaño máximo del archivo que /analyze-receipt
  * puede descargar desde fileUrl.
  */
-const MAX_RECEIPT_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
+const MAX_UPLOAD_SIZE = 20 * 1024 * 1024;
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_UPLOAD_SIZE,
+  },
+});
 
 /* =========================================================
    CORS
