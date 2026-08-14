@@ -17,25 +17,65 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
 import {
   createCanvas,
   DOMMatrix,
+  ImageData,
 } from 'canvas';
+
+import * as napiCanvas from '@napi-rs/canvas';
 
 import crypto from 'node:crypto';
 
 /* =========================================================
-   PDFJS + CANVAS
+   TIPOS
    ========================================================= */
 
-// PDF.js puede necesitar DOMMatrix en Node.
-(globalThis as any).DOMMatrix = DOMMatrix;
+interface KeyState {
+  ai: GoogleGenAI;
+  blockedUntil: number;
+  keyNumber: number;
+}
+
+interface DownloadedFile {
+  buffer: Buffer;
+  mimeType: string;
+}
 
 /* =========================================================
-   APP
+   PDF.JS / CANVAS
+   ========================================================= */
+
+/*
+ * pdfjs-dist puede necesitar estos objetos globales
+ * cuando corre en Node.
+ *
+ * IMPORTANTE:
+ * No importamos Path2D desde "canvas" porque las versiones
+ * actuales de @types/canvas no lo exponen correctamente.
+ */
+
+(globalThis as any).DOMMatrix = DOMMatrix;
+(globalThis as any).ImageData = ImageData;
+
+/*
+ * @napi-rs/canvas sí dispone de Path2D.
+ * Lo usamos solamente si está disponible.
+ */
+
+if (
+  !(globalThis as any).Path2D &&
+  (napiCanvas as any).Path2D
+) {
+  (globalThis as any).Path2D =
+    (napiCanvas as any).Path2D;
+}
+
+/* =========================================================
+   EXPRESS
    ========================================================= */
 
 const app = express();
 
 /* =========================================================
-   CONFIGURACIÓN GENERAL
+   CONFIGURACIÓN
    ========================================================= */
 
 const PORT =
@@ -46,7 +86,7 @@ const modelName =
   'gemini-3-flash-preview';
 
 const API_TOKEN =
-  process.env.API_TOKEN || '';
+  process.env.API_TOKEN?.trim() || '';
 
 const MAX_UPLOAD_SIZE =
   20 * 1024 * 1024;
@@ -60,8 +100,10 @@ const MAX_RECEIPT_FILE_SIZE =
 
 const upload = multer({
   storage: multer.memoryStorage(),
+
   limits: {
-    fileSize: MAX_UPLOAD_SIZE,
+    fileSize:
+      MAX_UPLOAD_SIZE,
   },
 });
 
@@ -69,29 +111,45 @@ const upload = multer({
    CORS
    ========================================================= */
 
+/*
+ * No usamos:
+ *
+ * app.options('*', ...)
+ *
+ * porque Express 5 / path-to-regexp genera:
+ *
+ * Missing parameter name at index 1: *
+ *
+ * El middleware cors ya responde correctamente
+ * a las solicitudes OPTIONS.
+ */
+
 app.use(
   cors({
-    origin: '*',
+    origin: true,
+
     methods: [
       'GET',
       'POST',
+      'PUT',
+      'DELETE',
       'OPTIONS',
     ],
+
     allowedHeaders: [
       'Content-Type',
       'Authorization',
       'X-API-Key',
     ],
+
+    credentials: false,
+
+    maxAge: 86400,
   })
 );
 
-app.options(
-  '*',
-  cors()
-);
-
 /* =========================================================
-   BODY PARSER
+   BODY PARSERS
    ========================================================= */
 
 app.use(
@@ -101,15 +159,10 @@ app.use(
 );
 
 app.use(
-  express.urlencoded({
-    extended: true,
-    limit: '25mb',
-  })
-);
-
-app.use(
   express.text({
-    type: ['text/plain'],
+    type: [
+      'text/plain',
+    ],
     limit: '25mb',
   })
 );
@@ -129,13 +182,20 @@ const apiKeys = [
   process.env.GEMINI_API_KEY_8,
   process.env.GEMINI_API_KEY_9,
   process.env.GEMINI_API_KEY_10,
-].filter(
-  (
-    key
-  ): key is string =>
-    typeof key === 'string' &&
-    key.trim().length > 0
-);
+]
+  .map((key) =>
+    typeof key === 'string'
+      ? key.trim()
+      : ''
+  )
+  .filter(
+    (key): key is string =>
+      key.length > 0
+  );
+
+/* =========================================================
+   LOG GEMINI
+   ========================================================= */
 
 if (
   apiKeys.length === 0
@@ -153,25 +213,28 @@ if (
    KEY MANAGER
    ========================================================= */
 
-interface KeyState {
-  ai: GoogleGenAI;
-  blockedUntil: number;
-}
-
 const keyStates: KeyState[] =
   apiKeys.map(
-    (key) => ({
-      ai: new GoogleGenAI({
-        apiKey: key,
-      }),
+    (
+      key,
+      index
+    ) => ({
+      ai:
+        new GoogleGenAI({
+          apiKey: key,
+        }),
+
       blockedUntil: 0,
+
+      keyNumber:
+        index + 1,
     })
   );
 
 let currentKeyIndex = 0;
 
 /* =========================================================
-   GET AVAILABLE KEY
+   OBTENER KEY DISPONIBLE
    ========================================================= */
 
 function getAvailableKey():
@@ -192,15 +255,16 @@ function getAvailableKey():
   ) {
     const index =
       (
-        currentKeyIndex + i
+        currentKeyIndex +
+        i
       ) %
       keyStates.length;
 
-    const keyState =
+    const state =
       keyStates[index];
 
     if (
-      keyState.blockedUntil <=
+      state.blockedUntil <=
       now
     ) {
       currentKeyIndex =
@@ -209,7 +273,7 @@ function getAvailableKey():
         ) %
         keyStates.length;
 
-      return keyState;
+      return state;
     }
   }
 
@@ -217,16 +281,19 @@ function getAvailableKey():
 }
 
 /* =========================================================
-   BLOCK KEY
+   BLOQUEAR KEY
    ========================================================= */
 
 function blockKey(
   keyState: KeyState,
   retryAfterMs: number
-) {
+): void {
   keyState.blockedUntil =
     Date.now() +
-    retryAfterMs;
+    Math.max(
+      retryAfterMs,
+      1000
+    );
 }
 
 /* =========================================================
@@ -241,26 +308,36 @@ function getRetryAfterMs(
       ? error.message
       : String(error);
 
-  const match =
-    message.match(
-      /retry(?:\s+in|\s+after)?\s*[:=]?\s*([\d.]+)\s*s?/i
-    );
+  const patterns = [
+    /retry in\s+([\d.]+)s/i,
+    /retryDelay[^0-9]*([\d.]+)s/i,
+    /retry-after[^0-9]*([\d.]+)/i,
+  ];
 
-  if (match) {
-    const seconds =
-      Number.parseFloat(
-        match[1]
+  for (
+    const pattern of patterns
+  ) {
+    const match =
+      message.match(
+        pattern
       );
 
-    if (
-      Number.isFinite(
-        seconds
-      ) &&
-      seconds > 0
-    ) {
-      return Math.ceil(
-        seconds * 1000
-      );
+    if (match) {
+      const seconds =
+        Number.parseFloat(
+          match[1]
+        );
+
+      if (
+        Number.isFinite(
+          seconds
+        ) &&
+        seconds > 0
+      ) {
+        return Math.ceil(
+          seconds * 1000
+        );
+      }
     }
   }
 
@@ -308,7 +385,7 @@ function isRateLimitError(
 }
 
 /* =========================================================
-   GEMINI ROTATION
+   EJECUTAR GEMINI CON ROTACIÓN
    ========================================================= */
 
 async function runGemini<T>(
@@ -353,19 +430,17 @@ async function runGemini<T>(
       keyState
     );
 
-    const keyNumber =
-      keyStates.indexOf(
-        keyState
-      ) + 1;
-
     try {
       console.log(
-        `Gemini: usando API key ${keyNumber}`
+        `Gemini: usando API key ${keyState.keyNumber}`
       );
 
-      return await operation(
-        keyState.ai
-      );
+      const result =
+        await operation(
+          keyState.ai
+        );
+
+      return result;
     } catch (
       error: unknown
     ) {
@@ -382,15 +457,15 @@ async function runGemini<T>(
           error
         );
 
+      console.warn(
+        `Gemini: API key ${keyState.keyNumber} limitada durante ${Math.ceil(
+          retryAfterMs / 1000
+        )}s.`
+      );
+
       blockKey(
         keyState,
         retryAfterMs
-      );
-
-      console.warn(
-        `Gemini: API key ${keyNumber} limitada durante ${Math.ceil(
-          retryAfterMs / 1000
-        )}s.`
       );
     }
   }
@@ -401,17 +476,21 @@ async function runGemini<T>(
 }
 
 /* =========================================================
-   BODY
+   NORMALIZAR BODY
    ========================================================= */
 
 function getRequestBody(
   req: Request
-): Record<string, any> {
+): Record<
+  string,
+  any
+> {
   let body: unknown =
     req.body;
 
   if (
-    typeof body === 'string'
+    typeof body ===
+    'string'
   ) {
     if (
       body.trim().length ===
@@ -422,7 +501,9 @@ function getRequestBody(
 
     try {
       body =
-        JSON.parse(body);
+        JSON.parse(
+          body
+        );
     } catch {
       return {};
     }
@@ -444,7 +525,7 @@ function getRequestBody(
 }
 
 /* =========================================================
-   EXPRESS PARAM
+   PARAM STRING
    ========================================================= */
 
 function getParamString(
@@ -544,9 +625,10 @@ function auth(
   next: NextFunction
 ) {
   /*
-   * Si no existe API_TOKEN,
-   * no bloqueamos la aplicación.
+   * Si API_TOKEN no está configurado,
+   * no bloqueamos el endpoint.
    */
+
   if (
     !API_TOKEN
   ) {
@@ -557,15 +639,15 @@ function auth(
     req.headers.authorization ||
     '';
 
-  const headerApiKey =
+  const apiKeyHeader =
     req.headers[
       'x-api-key'
     ];
 
   const sent =
-    typeof headerApiKey ===
+    typeof apiKeyHeader ===
     'string'
-      ? headerApiKey
+      ? apiKeyHeader
       : authorization.replace(
           /^Bearer\s+/i,
           ''
@@ -591,17 +673,17 @@ function auth(
 
 function ghConfig() {
   const owner =
-    process.env.GITHUB_OWNER;
+    process.env.GITHUB_OWNER?.trim();
 
   const repo =
-    process.env.GITHUB_REPO;
+    process.env.GITHUB_REPO?.trim();
 
   const branch =
-    process.env.GITHUB_BRANCH ||
+    process.env.GITHUB_BRANCH?.trim() ||
     'main';
 
   const token =
-    process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN?.trim();
 
   if (
     !owner ||
@@ -622,7 +704,7 @@ function ghConfig() {
 }
 
 /* =========================================================
-   VALIDATE GITHUB PATH
+   VALIDAR PATH GITHUB
    ========================================================= */
 
 function validateGithubPath(
@@ -679,7 +761,7 @@ function encodePathForGithub(
 }
 
 /* =========================================================
-   BASE64 PATH
+   PATH BASE64
    ========================================================= */
 
 function encodePathB64(
@@ -726,13 +808,16 @@ function decodePathB64(
     normalized += '=';
   }
 
-  return validateGithubPath(
+  const decoded =
     Buffer.from(
       normalized,
       'base64'
     ).toString(
       'utf8'
-    )
+    );
+
+  return validateGithubPath(
+    decoded
   );
 }
 
@@ -746,17 +831,23 @@ function githubHeaders(
   return {
     Authorization:
       `Bearer ${token}`,
+
     Accept:
       'application/vnd.github+json',
+
     'X-GitHub-Api-Version':
       '2022-11-28',
+
     'Content-Type':
       'application/json',
+
+    'User-Agent':
+      'torchill-api',
   };
 }
 
 /* =========================================================
-   GET GITHUB FILE
+   GITHUB GET FILE
    ========================================================= */
 
 async function getGithubFile(
@@ -767,11 +858,17 @@ async function getGithubFile(
     repo,
     branch,
     token,
-  } = ghConfig();
+  } =
+    ghConfig();
 
   const safePath =
     validateGithubPath(
       path
+    );
+
+  const encodedPath =
+    encodePathForGithub(
+      safePath
     );
 
   const url =
@@ -779,9 +876,7 @@ async function getGithubFile(
       owner
     )}/${encodeURIComponent(
       repo
-    )}/contents/${encodePathForGithub(
-      safePath
-    )}?ref=${encodeURIComponent(
+    )}/contents/${encodedPath}?ref=${encodeURIComponent(
       branch
     )}`;
 
@@ -789,6 +884,7 @@ async function getGithubFile(
     await fetch(
       url,
       {
+        method: 'GET',
         headers:
           githubHeaders(
             token
@@ -797,15 +893,15 @@ async function getGithubFile(
     );
 
   if (
+    response.status ===
+    404
+  ) {
+    return null;
+  }
+
+  if (
     !response.ok
   ) {
-    if (
-      response.status ===
-      404
-    ) {
-      return null;
-    }
-
     const text =
       await response.text();
 
@@ -830,7 +926,8 @@ async function uploadToGithub(
     repo,
     branch,
     token,
-  } = ghConfig();
+  } =
+    ghConfig();
 
   const safePath =
     validateGithubPath(
@@ -866,10 +963,12 @@ async function uploadToGithub(
   > = {
     message:
       `Torchill receipt upload: ${safePath}`,
+
     content:
       data.toString(
         'base64'
       ),
+
     branch,
   };
 
@@ -887,10 +986,12 @@ async function uploadToGithub(
       url,
       {
         method: 'PUT',
+
         headers:
           githubHeaders(
             token
           ),
+
         body:
           JSON.stringify(
             body
@@ -913,13 +1014,19 @@ async function uploadToGithub(
     await response.json();
 
   return {
-    path: safePath,
+    path:
+      safePath,
+
     sha:
       result.content?.sha ||
       null,
+
     branch,
+
     owner,
+
     repo,
+
     pathB64:
       encodePathB64(
         safePath
@@ -978,7 +1085,7 @@ function mimeForPath(
 }
 
 /* =========================================================
-   MIME FROM URL
+   MIME DESDE URL / HEADER
    ========================================================= */
 
 function getMimeType(
@@ -1019,20 +1126,23 @@ function getMimeType(
 
 async function downloadGithubFile(
   path: string
-): Promise<{
-  buffer: Buffer;
-  mimeType: string;
-}> {
+): Promise<DownloadedFile> {
   const {
     owner,
     repo,
     branch,
     token,
-  } = ghConfig();
+  } =
+    ghConfig();
 
   const safePath =
     validateGithubPath(
       path
+    );
+
+  const encodedPath =
+    encodePathForGithub(
+      safePath
     );
 
   const url =
@@ -1040,9 +1150,7 @@ async function downloadGithubFile(
       owner
     )}/${encodeURIComponent(
       repo
-    )}/contents/${encodePathForGithub(
-      safePath
-    )}?ref=${encodeURIComponent(
+    )}/contents/${encodedPath}?ref=${encodeURIComponent(
       branch
     )}`;
 
@@ -1050,6 +1158,8 @@ async function downloadGithubFile(
     await fetch(
       url,
       {
+        method: 'GET',
+
         headers:
           githubHeaders(
             token
@@ -1058,17 +1168,17 @@ async function downloadGithubFile(
     );
 
   if (
+    response.status ===
+    404
+  ) {
+    throw new Error(
+      'Archivo no encontrado en GitHub.'
+    );
+  }
+
+  if (
     !response.ok
   ) {
-    if (
-      response.status ===
-      404
-    ) {
-      throw new Error(
-        'Archivo no encontrado en GitHub.'
-      );
-    }
-
     const text =
       await response.text();
 
@@ -1114,6 +1224,7 @@ async function downloadGithubFile(
 
   return {
     buffer,
+
     mimeType:
       mimeForPath(
         safePath
@@ -1134,8 +1245,12 @@ async function pdfFirstPageToPng(
         new Uint8Array(
           buffer
         ),
-      isEvalSupported: false,
-      useSystemFonts: false,
+
+      isEvalSupported:
+        false,
+
+      useSystemFonts:
+        false,
     });
 
   const pdf =
@@ -1143,7 +1258,8 @@ async function pdfFirstPageToPng(
 
   try {
     if (
-      pdf.numPages < 1
+      pdf.numPages <
+      1
     ) {
       throw new Error(
         'El PDF no contiene páginas.'
@@ -1196,6 +1312,7 @@ async function pdfFirstPageToPng(
     await page.render({
       canvasContext:
         context as any,
+
       viewport,
     }).promise;
 
@@ -1203,22 +1320,17 @@ async function pdfFirstPageToPng(
       'image/png'
     );
   } finally {
-    try {
-      await pdf.destroy();
-    } catch {}
+    await pdf.destroy();
   }
 }
 
 /* =========================================================
-   DOWNLOAD RECEIPT
+   DOWNLOAD RECEIPT FROM URL
    ========================================================= */
 
 async function downloadReceipt(
   fileUrl: string
-): Promise<{
-  buffer: Buffer;
-  mimeType: string;
-}> {
+): Promise<DownloadedFile> {
   let parsedUrl: URL;
 
   try {
@@ -1288,11 +1400,14 @@ async function downloadReceipt(
   let total = 0;
 
   try {
-    while (true) {
+    while (
+      true
+    ) {
       const {
         done,
         value,
-      } = await reader.read();
+      } =
+        await reader.read();
 
       if (
         done
@@ -1331,9 +1446,7 @@ async function downloadReceipt(
   const buffer =
     Buffer.concat(
       chunks.map(
-        (
-          chunk
-        ) =>
+        (chunk) =>
           Buffer.from(
             chunk
           )
@@ -1432,6 +1545,7 @@ app.get(
         .json({
           error:
             'No se pudo obtener el archivo.',
+
           details:
             message,
         });
@@ -1453,28 +1567,42 @@ app.get(
       .status(200)
       .json({
         ok: true,
+
         service:
           'torchill-api',
+
         model:
           modelName,
+
         gemini:
-          apiKeys.length > 0,
+          apiKeys.length >
+          0,
+
         geminiConfigured:
-          apiKeys.length > 0,
+          apiKeys.length >
+          0,
+
         geminiKeys:
           apiKeys.length,
+
         githubConfigured:
           Boolean(
             process.env.GITHUB_OWNER &&
             process.env.GITHUB_REPO &&
             process.env.GITHUB_TOKEN
           ),
+
+        node:
+          process.version,
+
+        timestamp:
+          new Date().toISOString(),
       });
   }
 );
 
 /* =========================================================
-   PROJECT COPY HEALTH
+   GEMINI PROJECT COPY HEALTH
    ========================================================= */
 
 app.get(
@@ -1486,15 +1614,22 @@ app.get(
     return res
       .status(200)
       .json({
-        status: 'ok',
+        status:
+          'ok',
+
         service:
           'torchill-api',
+
         model:
           modelName,
+
         geminiConfigured:
-          apiKeys.length > 0,
+          apiKeys.length >
+          0,
+
         geminiKeys:
           apiKeys.length,
+
         message:
           'Torchill API funcionando correctamente.',
       });
@@ -1508,7 +1643,9 @@ app.get(
 app.post(
   '/upload',
   auth,
-  upload.single('file'),
+  upload.single(
+    'file'
+  ),
   async (
     req: Request,
     res: Response
@@ -1534,7 +1671,7 @@ app.post(
         );
 
       /* =====================================================
-         BASE64
+         BASE64 FALLBACK
          ===================================================== */
 
       if (
@@ -1555,18 +1692,27 @@ app.post(
               ''
             );
 
-          buffer =
-            Buffer.from(
-              clean,
-              'base64'
-            );
+          try {
+            buffer =
+              Buffer.from(
+                clean,
+                'base64'
+              );
+          } catch {
+            return res
+              .status(400)
+              .json({
+                error:
+                  'dataBase64 inválido.',
+              });
+          }
 
           originalName =
             typeof body.fileName ===
             'string'
               ? body.fileName
               : typeof body.filename ===
-                'string'
+                  'string'
                 ? body.filename
                 : 'receipt';
 
@@ -1575,10 +1721,10 @@ app.post(
             'string'
               ? body.mimeType
               : typeof body.mime ===
-                'string'
+                  'string'
                 ? body.mime
                 : typeof body.contentType ===
-                  'string'
+                    'string'
                   ? body.contentType
                   : '';
         }
@@ -1683,7 +1829,7 @@ app.post(
       }
 
       /* =====================================================
-         DETECT PDF REAL
+         DETECTAR PDF REAL
          ===================================================== */
 
       const isPdf =
@@ -1726,14 +1872,15 @@ app.post(
       }
 
       /* =====================================================
-         VALIDAR EXTENSIONES
+         EXTENSIONES PERMITIDAS
          ===================================================== */
 
       const allowedExtensions =
         new Set([
           'pdf',
-          'jpg',
           'png',
+          'jpg',
+          'jpeg',
           'webp',
           'gif',
           'svg',
@@ -1748,17 +1895,29 @@ app.post(
           .status(400)
           .json({
             error:
-              `Extensión no permitida: ${finalExtension}`,
+              `Tipo de archivo no permitido: .${finalExtension}`,
           });
       }
+
+      /* =====================================================
+         MIME FINAL
+         ===================================================== */
 
       const finalMimeType =
         mimeForPath(
           `file.${finalExtension}`
         );
 
+      if (
+        finalMimeType !==
+        'application/octet-stream'
+      ) {
+        mimeType =
+          finalMimeType;
+      }
+
       /* =====================================================
-         PATH
+         PATH GITHUB
          ===================================================== */
 
       let requestedPath =
@@ -1773,6 +1932,11 @@ app.post(
         requestedPath =
           `receipts/${Date.now()}-${crypto.randomUUID()}.${finalExtension}`;
       } else {
+        requestedPath =
+          validateGithubPath(
+            requestedPath
+          );
+
         const hasExtension =
           /\.[a-zA-Z0-9]+$/.test(
             requestedPath
@@ -1801,10 +1965,8 @@ app.post(
         'Upload:',
         {
           originalName,
-          mimeType:
-            finalMimeType,
-          extension:
-            finalExtension,
+          mimeType,
+          finalExtension,
           size:
             buffer.length,
           path:
@@ -1837,6 +1999,12 @@ app.post(
         );
 
       const protocol =
+        req.headers[
+          'x-forwarded-proto'
+        ]
+          ?.toString()
+          .split(',')[0]
+          .trim() ||
         req.protocol;
 
       const absoluteUrl =
@@ -1852,14 +2020,22 @@ app.post(
         .status(200)
         .json({
           ok: true,
+
           ...result,
+
           mimeType:
-            finalMimeType,
+            mimeForPath(
+              result.path
+            ),
+
           size:
             buffer.length,
+
           url:
             receiptUrl,
+
           receiptUrl,
+
           absoluteUrl,
         });
     } catch (
@@ -1880,6 +2056,7 @@ app.post(
         .json({
           error:
             'No se pudo subir el archivo.',
+
           details:
             message,
         });
@@ -1926,13 +2103,17 @@ app.post(
       if (
         Object.keys(
           body
-        ).length === 0
+        ).length ===
+        0
       ) {
         return res
           .status(400)
           .json({
             error:
               'La solicitud no contiene un body JSON válido.',
+
+            expected:
+              '{"title":"...","text":"..."}',
           });
       }
 
@@ -1974,8 +2155,7 @@ app.post(
             ? 'inglés'
             : 'español';
 
-        const prompt =
-          `
+        const prompt = `
 Actúa como traductor profesional especializado en diseño gráfico y comunicación visual.
 
 Traduce los siguientes textos al ${targetLanguage}.
@@ -1984,7 +2164,7 @@ Reglas:
 - Mantén exactamente el significado.
 - No inventes información.
 - No elimines información.
-- Conserva el orden.
+- Conserva el orden de los textos.
 - Mantén un tono profesional.
 - La traducción debe sonar natural.
 - No agregues explicaciones.
@@ -1995,10 +2175,13 @@ ${JSON.stringify(
   segments
 )}
 
-Devuelve exclusivamente JSON válido:
+Devuelve exclusivamente JSON válido con esta estructura:
 
 {
-  "translations": ["texto traducido 1", "texto traducido 2"]
+  "translations": [
+    "texto traducido 1",
+    "texto traducido 2"
+  ]
 }
 `;
 
@@ -2009,39 +2192,51 @@ Devuelve exclusivamente JSON válido:
                 {
                   model:
                     modelName,
+
                   input:
                     prompt,
+
                   response_format:
                     {
-                      type: 'text',
+                      type:
+                        'text',
+
                       mime_type:
                         'application/json',
+
                       schema:
                         {
-                          type: 'object',
+                          type:
+                            'object',
+
                           properties:
                             {
                               translations:
                                 {
-                                  type: 'array',
+                                  type:
+                                    'array',
+
                                   items:
                                     {
-                                      type: 'string',
+                                      type:
+                                        'string',
                                     },
                                 },
                             },
+
                           required:
                             [
                               'translations',
                             ],
                         },
                     },
-                }
+                } as any
               )
           );
 
         const output =
-          interaction.output_text?.trim();
+          interaction.output_text
+            ?.trim();
 
         if (
           !output
@@ -2051,12 +2246,15 @@ Devuelve exclusivamente JSON válido:
           );
         }
 
+        const result =
+          parseGeminiJson(
+            output
+          );
+
         return res
           .status(200)
           .json(
-            parseGeminiJson(
-              output
-            )
+            result
           );
       }
 
@@ -2067,7 +2265,9 @@ Devuelve exclusivamente JSON válido:
       if (
         typeof title !==
           'string' ||
-        !title.trim()
+        title.trim()
+          .length ===
+          0
       ) {
         return res
           .status(400)
@@ -2080,7 +2280,9 @@ Devuelve exclusivamente JSON válido:
       if (
         typeof text !==
           'string' ||
-        !text.trim()
+        text.trim()
+          .length ===
+          0
       ) {
         return res
           .status(400)
@@ -2090,27 +2292,28 @@ Devuelve exclusivamente JSON válido:
           });
       }
 
-      const prompt =
-        `
+      const prompt = `
 Actúa como director de arte y editor especializado en portfolios profesionales de diseño gráfico.
 
 Proyecto:
+
 ${title}
 
 Texto original:
+
 ${text}
 
 Objetivos:
-- Mejorar claridad.
-- Mejorar redacción.
-- Mantener intención original.
+- Mejorar la claridad.
+- Mejorar la redacción.
+- Mantener la intención original.
 - Utilizar lenguaje profesional.
 - Evitar frases publicitarias genéricas.
 - No inventar información.
 - No agregar datos inexistentes.
 - Mantener el contenido apropiado para un portfolio de diseño.
 
-Devuelve exclusivamente JSON válido:
+Devuelve exclusivamente JSON válido con esta estructura:
 
 {
   "lead": "string",
@@ -2121,7 +2324,9 @@ Devuelve exclusivamente JSON válido:
       "summary": "string"
     }
   ],
-  "imageAlts": ["string"]
+  "imageAlts": [
+    "string"
+  ]
 }
 `;
 
@@ -2132,43 +2337,62 @@ Devuelve exclusivamente JSON válido:
               {
                 model:
                   modelName,
+
                 input:
                   prompt,
+
                 response_format:
                   {
-                    type: 'text',
+                    type:
+                      'text',
+
                     mime_type:
                       'application/json',
+
                     schema:
                       {
-                        type: 'object',
+                        type:
+                          'object',
+
                         properties:
                           {
                             lead:
                               {
-                                type: 'string',
+                                type:
+                                  'string',
                               },
+
                             discipline:
                               {
-                                type: 'string',
+                                type:
+                                  'string',
                               },
+
                             sections:
                               {
-                                type: 'array',
+                                type:
+                                  'array',
+
                                 items:
                                   {
-                                    type: 'object',
+                                    type:
+                                      'object',
+
                                     properties:
                                       {
                                         title:
                                           {
-                                            type: 'string',
+                                            type:
+                                              'string',
                                           },
+
                                         summary:
                                           {
-                                            type: 'string',
+                                            type:
+                                              'string',
                                           },
                                       },
+
                                     required:
                                       [
                                         'title',
@@ -2176,15 +2400,20 @@ Devuelve exclusivamente JSON válido:
                                       ],
                                   },
                               },
+
                             imageAlts:
                               {
-                                type: 'array',
+                                type:
+                                  'array',
+
                                 items:
                                   {
-                                    type: 'string',
+                                    type:
+                                      'string',
                                   },
                               },
                           },
+
                         required:
                           [
                             'lead',
@@ -2194,12 +2423,13 @@ Devuelve exclusivamente JSON válido:
                           ],
                       },
                   },
-              }
+              } as any
             )
         );
 
       const output =
-        interaction.output_text?.trim();
+        interaction.output_text
+          ?.trim();
 
       if (
         !output
@@ -2209,12 +2439,15 @@ Devuelve exclusivamente JSON válido:
         );
       }
 
+      const result =
+        parseGeminiJson(
+          output
+        );
+
       return res
         .status(200)
         .json(
-          parseGeminiJson(
-            output
-          )
+          result
         );
     } catch (
       error: unknown
@@ -2234,8 +2467,14 @@ Devuelve exclusivamente JSON válido:
           .json({
             error:
               'Todas las API keys de Gemini están temporalmente limitadas.',
+
             retryable:
               true,
+
+            retryAfter:
+              getRetryAfterMs(
+                error
+              ),
           });
       }
 
@@ -2249,6 +2488,7 @@ Devuelve exclusivamente JSON válido:
         .json({
           error:
             'Error procesando la solicitud con Gemini.',
+
           details:
             message,
         });
@@ -2293,7 +2533,9 @@ app.post(
       if (
         typeof fileUrl !==
           'string' ||
-        !fileUrl.trim()
+        fileUrl.trim()
+          .length ===
+          0
       ) {
         return res
           .status(400)
@@ -2306,7 +2548,9 @@ app.post(
       if (
         typeof prompt !==
           'string' ||
-        !prompt.trim()
+        prompt.trim()
+          .length ===
+          0
       ) {
         return res
           .status(400)
@@ -2316,9 +2560,9 @@ app.post(
           });
       }
 
-      /* =====================================================
+      /* ===================================================
          DOWNLOAD
-         ===================================================== */
+         =================================================== */
 
       let {
         buffer,
@@ -2329,19 +2573,19 @@ app.post(
         );
 
       console.log(
-        `Receipt: ${buffer.length} bytes - ${mimeType}`
+        `Receipt: archivo descargado (${buffer.length} bytes, ${mimeType})`
       );
 
-      /* =====================================================
+      /* ===================================================
          PDF
-         ===================================================== */
+         =================================================== */
 
       if (
         mimeType ===
         'application/pdf'
       ) {
         console.log(
-          'Receipt: PDF detectado. Convirtiendo primera página...'
+          'Receipt: PDF detectado. Convirtiendo primera página a PNG...'
         );
 
         try {
@@ -2357,13 +2601,13 @@ app.post(
             'image/png';
 
           console.log(
-            `Receipt: PDF convertido (${buffer.length} bytes)`
+            `Receipt: PDF convertido a PNG (${buffer.length} bytes)`
           );
         } catch (
           pdfError
         ) {
           console.error(
-            'PDF conversion error:',
+            'Receipt PDF conversion error:',
             pdfError
           );
 
@@ -2372,8 +2616,10 @@ app.post(
             .json({
               error:
                 'No se pudo convertir el PDF a imagen.',
+
               details:
-                pdfError instanceof Error
+                pdfError instanceof
+                Error
                   ? pdfError.message
                   : String(
                       pdfError
@@ -2382,17 +2628,16 @@ app.post(
         }
       }
 
-      /* =====================================================
+      /* ===================================================
          GEMINI
-         ===================================================== */
+         =================================================== */
 
       const base64 =
         buffer.toString(
           'base64'
         );
 
-      const geminiPrompt =
-        `
+      const geminiPrompt = `
 ${prompt}
 
 IMPORTANTE:
@@ -2410,17 +2655,20 @@ IMPORTANTE:
               {
                 model:
                   modelName,
+
                 contents:
                   [
                     {
                       role:
                         'user',
+
                       parts:
                         [
                           {
                             text:
                               geminiPrompt,
                           },
+
                           {
                             inlineData:
                               {
@@ -2432,10 +2680,12 @@ IMPORTANTE:
                         ],
                     },
                   ],
+
                 config:
                   {
                     responseMimeType:
                       'application/json',
+
                     temperature:
                       0.1,
                   },
@@ -2444,7 +2694,8 @@ IMPORTANTE:
         );
 
       const text =
-        response.text?.trim() ||
+        response.text
+          ?.trim() ||
         '';
 
       if (
@@ -2455,6 +2706,10 @@ IMPORTANTE:
         );
       }
 
+      /* ===================================================
+         JSON
+         =================================================== */
+
       const parsed =
         parseGeminiJson(
           text
@@ -2464,8 +2719,10 @@ IMPORTANTE:
         .status(200)
         .json({
           ok: true,
+
           detected:
             parsed,
+
           raw:
             text,
         });
@@ -2487,8 +2744,14 @@ IMPORTANTE:
           .json({
             error:
               'Todas las API keys de Gemini están temporalmente limitadas.',
+
             retryable:
               true,
+
+            retryAfter:
+              getRetryAfterMs(
+                error
+              ),
           });
       }
 
@@ -2502,6 +2765,7 @@ IMPORTANTE:
         .json({
           error:
             'Error analizando el comprobante.',
+
           details:
             message,
         });
@@ -2540,45 +2804,13 @@ app.use(
         .status(400)
         .json({
           error:
-            `Error de upload: ${error.message}`,
+            error.message,
         });
     }
 
     return next(
       error
     );
-  }
-);
-
-/* =========================================================
-   GLOBAL ERROR
-   ========================================================= */
-
-app.use(
-  (
-    error: unknown,
-    _req: Request,
-    res: Response,
-    _next: NextFunction
-  ) => {
-    console.error(
-      'Unhandled error:',
-      error
-    );
-
-    const message =
-      error instanceof Error
-        ? error.message
-        : String(error);
-
-    return res
-      .status(500)
-      .json({
-        error:
-          'Error interno del servidor.',
-        details:
-          message,
-      });
   }
 );
 
@@ -2601,68 +2833,160 @@ app.use(
 );
 
 /* =========================================================
+   ERROR GENERAL
+   ========================================================= */
+
+app.use(
+  (
+    error: unknown,
+    _req: Request,
+    res: Response,
+    _next: NextFunction
+  ) => {
+    console.error(
+      'Unhandled server error:',
+      error
+    );
+
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    return res
+      .status(500)
+      .json({
+        error:
+          'Error interno del servidor.',
+
+        details:
+          message,
+      });
+  }
+);
+
+/* =========================================================
    START
    ========================================================= */
 
-app.listen(
-  PORT,
-  () => {
-    console.log(
-      '======================================'
-    );
+const server =
+  app.listen(
+    PORT,
+    '0.0.0.0',
+    () => {
+      console.log(
+        '========================================'
+      );
 
-    console.log(
-      `Torchill API escuchando en puerto ${PORT}`
-    );
+      console.log(
+        'Torchill API iniciada correctamente'
+      );
 
-    console.log(
-      `Modelo Gemini: ${modelName}`
-    );
+      console.log(
+        `Puerto: ${PORT}`
+      );
 
-    console.log(
-      `Gemini API keys: ${apiKeys.length}`
-    );
+      console.log(
+        `Modelo Gemini: ${modelName}`
+      );
 
-    console.log(
-      `GitHub configurado: ${
-        Boolean(
-          process.env.GITHUB_OWNER &&
-          process.env.GITHUB_REPO &&
-          process.env.GITHUB_TOKEN
-        )
-      }`
-    );
+      console.log(
+        `Gemini API keys: ${apiKeys.length}`
+      );
 
-    console.log(
-      'Endpoints:'
-    );
+      console.log(
+        `GitHub configurado: ${
+          Boolean(
+            process.env.GITHUB_OWNER &&
+            process.env.GITHUB_REPO &&
+            process.env.GITHUB_TOKEN
+          )
+        }`
+      );
 
-    console.log(
-      'GET  /health'
-    );
+      console.log(
+        '----------------------------------------'
+      );
 
-    console.log(
-      'GET  /api/gemini/project-copy'
-    );
+      console.log(
+        'GET  /health'
+      );
 
-    console.log(
-      'POST /api/gemini/project-copy'
-    );
+      console.log(
+        'GET  /api/gemini/project-copy'
+      );
 
-    console.log(
-      'POST /upload'
-    );
+      console.log(
+        'POST /api/gemini/project-copy'
+      );
 
-    console.log(
-      'GET  /receipt/:pathB64'
-    );
+      console.log(
+        'POST /upload'
+      );
 
-    console.log(
-      'POST /analyze-receipt'
-    );
+      console.log(
+        'GET  /receipt/:pathB64'
+      );
 
-    console.log(
-      '======================================'
-    );
-  }
+      console.log(
+        'POST /analyze-receipt'
+      );
+
+      console.log(
+        '========================================'
+      );
+    }
+  );
+
+/* =========================================================
+   SHUTDOWN
+   ========================================================= */
+
+function shutdown(
+  signal: string
+) {
+  console.log(
+    `${signal}: cerrando servidor...`
+  );
+
+  server.close(
+    () => {
+      console.log(
+        'Servidor cerrado correctamente.'
+      );
+
+      process.exit(
+        0
+      );
+    }
+  );
+
+  setTimeout(
+    () => {
+      console.error(
+        'Forzando cierre del servidor.'
+      );
+
+      process.exit(
+        1
+      );
+    },
+    10_000
+  ).unref();
+}
+
+process.on(
+  'SIGTERM',
+  () =>
+    shutdown(
+      'SIGTERM'
+    )
+);
+
+process.on(
+  'SIGINT',
+  () =>
+    shutdown(
+      'SIGINT'
+    )
 );
