@@ -1164,7 +1164,70 @@ async function downloadReceipt(
           )
       )
     );
+/* =========================================================
+   DETECTAR MIME TYPE DESDE URL / CONTENT-TYPE
+   ========================================================= */
 
+function getMimeType(
+  fileUrl: string,
+  contentType: string
+): string {
+  const detected =
+    contentType
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+
+  if (
+    detected &&
+    detected !==
+      'application/octet-stream'
+  ) {
+    return detected;
+  }
+
+  const lowerUrl =
+    fileUrl.toLowerCase();
+
+  if (
+    lowerUrl.includes('.pdf')
+  ) {
+    return 'application/pdf';
+  }
+
+  if (
+    lowerUrl.includes('.png')
+  ) {
+    return 'image/png';
+  }
+
+  if (
+    lowerUrl.includes('.webp')
+  ) {
+    return 'image/webp';
+  }
+
+  if (
+    lowerUrl.includes('.gif')
+  ) {
+    return 'image/gif';
+  }
+
+  if (
+    lowerUrl.includes('.svg')
+  ) {
+    return 'image/svg+xml';
+  }
+
+  if (
+    lowerUrl.includes('.jpg') ||
+    lowerUrl.includes('.jpeg')
+  ) {
+    return 'image/jpeg';
+  }
+
+  return 'image/jpeg';
+}
   const mimeType =
     getMimeType(
       fileUrl,
