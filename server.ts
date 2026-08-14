@@ -18,7 +18,32 @@ import {
 } from '@napi-rs/canvas';
 
 import crypto from 'node:crypto';
+/* =========================================================
+   PDFJS + @napi-rs/canvas
+   ========================================================= */
 
+/*
+ * pdfjs-dist 3.11.174 intenta cargar el paquete "canvas"
+ * cuando no encuentra APIs DOM como DOMMatrix y Path2D.
+ *
+ * Nosotros usamos @napi-rs/canvas, por lo que le damos
+ * a PDF.js las APIs que necesita antes de cargar PDF.js.
+ */
+
+import {
+  DOMMatrix,
+  Path2D,
+  ImageData,
+} from '@napi-rs/canvas';
+
+(globalThis as any).DOMMatrix =
+  DOMMatrix;
+
+(globalThis as any).Path2D =
+  Path2D;
+
+(globalThis as any).ImageData =
+  ImageData;
 const app = express();
 
 /* =========================================================
