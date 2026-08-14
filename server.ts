@@ -1,4 +1,8 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, {
+  Request,
+  Response,
+  NextFunction,
+} from 'express';
 
 import cors from 'cors';
 
@@ -12,56 +16,21 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
 
 import {
   createCanvas,
-} from '@napi-rs/canvas';
-
-import crypto from 'node:crypto';
-
-import {
   DOMMatrix,
   Path2D,
   ImageData,
 } from '@napi-rs/canvas';
 
-(globalThis as any).DOMMatrix =
-  DOMMatrix;
-
-(globalThis as any).Path2D =
-  Path2D;
-
-(globalThis as any).ImageData =
-  ImageData;
-
-import {
-  createCanvas,
-} from '@napi-rs/canvas';
-
 import crypto from 'node:crypto';
+
 /* =========================================================
    PDFJS + @napi-rs/canvas
    ========================================================= */
 
-/*
- * pdfjs-dist 3.11.174 intenta cargar el paquete "canvas"
- * cuando no encuentra APIs DOM como DOMMatrix y Path2D.
- *
- * Nosotros usamos @napi-rs/canvas, por lo que le damos
- * a PDF.js las APIs que necesita antes de cargar PDF.js.
- */
+(globalThis as any).DOMMatrix = DOMMatrix;
+(globalThis as any).Path2D = Path2D;
+(globalThis as any).ImageData = ImageData;
 
-import {
-  DOMMatrix,
-  Path2D,
-  ImageData,
-} from '@napi-rs/canvas';
-
-(globalThis as any).DOMMatrix =
-  DOMMatrix;
-
-(globalThis as any).Path2D =
-  Path2D;
-
-(globalThis as any).ImageData =
-  ImageData;
 const app = express();
 
 /* =========================================================
@@ -446,15 +415,6 @@ function getRequestBody(
 /* =========================================================
    PARÁMETRO STRING DE EXPRESS
    ========================================================= */
-
-/*
- * Express puede tipar algunos parámetros como
- * string | string[].
- *
- * Esta función garantiza que siempre obtengamos
- * un string antes de pasarlo a funciones que
- * requieren string.
- */
 
 function getParamString(
   value:
@@ -967,11 +927,8 @@ function getMimeType(
     const parsed =
       new URL(fileUrl);
 
-    const pathname =
-      parsed.pathname;
-
     return mimeForPath(
-      pathname
+      parsed.pathname
     );
   } catch {
     return 'application/octet-stream';
@@ -1302,7 +1259,7 @@ async function downloadReceipt(
 }
 
 /* =========================================================
-   GET RECEIPT DESDE GITHUB
+   GET RECEIPT
    ========================================================= */
 
 app.get(
@@ -1312,16 +1269,6 @@ app.get(
     res: Response
   ) => {
     try {
-      /*
-       * FIX PRINCIPAL DEL ERROR TS2345:
-       *
-       * req.params.pathB64 puede ser tratado por
-       * TypeScript como string | string[].
-       *
-       * Lo normalizamos a string antes de llamar
-       * a decodePathB64().
-       */
-
       const pathB64 =
         getParamString(
           req.params.pathB64
@@ -1452,10 +1399,6 @@ app.get(
    UPLOAD
    ========================================================= */
 
-/* =========================================================
-   UPLOAD
-   ========================================================= */
-
 app.post(
   '/upload',
   auth,
@@ -1476,18 +1419,6 @@ app.post(
 
       const body =
         getRequestBody(req);
-
-      /*
-       * También acepta JSON:
-       *
-       * {
-       *   dataBase64: "...",
-       *   fileName: "ticket.pdf",
-       *   mimeType: "application/pdf",
-       *   ext: "pdf",
-       *   path: "receipts/ticket.pdf"
-       * }
-       */
 
       if (!buffer) {
         const dataBase64 =
@@ -1544,7 +1475,7 @@ app.post(
       }
 
       /* =====================================================
-         DETERMINAR TIPO REAL DEL ARCHIVO
+         DETERMINAR TIPO REAL
          ===================================================== */
 
       const requestedExt =
@@ -1561,13 +1492,6 @@ app.post(
           .trim()
           .toLowerCase();
 
-      /*
-       * Primero usamos el MIME recibido.
-       * Si no existe, usamos ext.
-       * Finalmente intentamos obtener la extensión
-       * del nombre original.
-       */
-
       let finalExtension = '';
 
       if (
@@ -1582,12 +1506,12 @@ app.post(
         finalExtension = 'png';
       } else if (
         normalizedMime ===
-          'image/webp'
+        'image/webp'
       ) {
         finalExtension = 'webp';
       } else if (
         normalizedMime ===
-          'image/gif'
+        'image/gif'
       ) {
         finalExtension = 'gif';
       } else if (
@@ -1613,11 +1537,7 @@ app.post(
       }
 
       /*
-       * Si todavía no sabemos la extensión,
-       * intentamos detectar PDF por sus bytes.
-       *
-       * Un PDF comienza normalmente con:
-       * %PDF-
+       * Detectar PDF por bytes.
        */
 
       if (
@@ -1632,10 +1552,6 @@ app.post(
           'application/pdf';
       }
 
-      /*
-       * Fallback final para imágenes.
-       */
-
       if (!finalExtension) {
         finalExtension = 'jpg';
       }
@@ -1646,14 +1562,14 @@ app.post(
 
       if (
         finalExtension ===
-          'jpeg'
+        'jpeg'
       ) {
         finalExtension = 'jpg';
       }
 
       if (
         finalExtension ===
-          'jpe'
+        'jpe'
       ) {
         finalExtension = 'jpg';
       }
@@ -1666,11 +1582,6 @@ app.post(
         mimeForPath(
           `file.${finalExtension}`
         );
-
-      /*
-       * Si mimeForPath no conoce el formato,
-       * conservamos el MIME recibido.
-       */
 
       if (
         finalMimeType !==
@@ -1698,6 +1609,8 @@ app.post(
           '_'
         );
 
+      void safeName;
+
       /* =====================================================
          PATH DE GITHUB
          ===================================================== */
@@ -1712,11 +1625,6 @@ app.post(
         requestedPath =
           `receipts/${Date.now()}-${crypto.randomUUID()}.${finalExtension}`;
       } else {
-        /*
-         * Si el frontend manda un path sin extensión,
-         * agregamos la extensión correcta.
-         */
-
         const pathHasExtension =
           /\.[a-zA-Z0-9]+$/.test(
             requestedPath
@@ -1726,11 +1634,6 @@ app.post(
           requestedPath =
             `${requestedPath}.${finalExtension}`;
         } else {
-          /*
-           * Si el frontend mandó .jpg pero el archivo
-           * real es PDF, corregimos la extensión.
-           */
-
           requestedPath =
             requestedPath.replace(
               /\.[a-zA-Z0-9]+$/,
@@ -1751,9 +1654,7 @@ app.post(
           requestedExt,
           originalMime: mimeType,
           finalExtension,
-          finalMimeType: mimeForPath(
-            requestedPath
-          ),
+          finalMimeType,
           size: buffer.length,
           path: requestedPath,
           pdfDetected:
@@ -1794,25 +1695,18 @@ app.post(
 
       return res.status(200).json({
         ok: true,
-
         ...result,
-
         mimeType:
           mimeForPath(
             result.path
           ),
-
         size:
           buffer.length,
-
         url:
           receiptUrl,
-
         receiptUrl,
-
         absoluteUrl,
       });
-
     } catch (
       error: unknown
     ) {
