@@ -19,7 +19,9 @@ import {
   DOMMatrix,
   Path2D,
   ImageData,
-} from '@napi-rs/canvas';
+} from 'canvas';
+
+import * as napiCanvas from '@napi-rs/canvas';
 
 import crypto from 'node:crypto';
 
