@@ -1431,6 +1431,10 @@ app.get(
    UPLOAD
    ========================================================= */
 
+/* =========================================================
+   UPLOAD
+   ========================================================= */
+
 app.post(
   '/upload',
   auth,
@@ -1440,27 +1444,33 @@ app.post(
     res: Response
   ) => {
     try {
-      let buffer:
-        | Buffer
-        | null =
-        req.file?.buffer ||
-        null;
+      let buffer: Buffer | null =
+        req.file?.buffer || null;
 
       let originalName =
-        req.file?.originalname ||
-        '';
+        req.file?.originalname || '';
 
       let mimeType =
-        req.file?.mimetype ||
-        '';
+        req.file?.mimetype || '';
 
       const body =
         getRequestBody(req);
 
+      /*
+       * También acepta JSON:
+       *
+       * {
+       *   dataBase64: "...",
+       *   fileName: "ticket.pdf",
+       *   mimeType: "application/pdf",
+       *   ext: "pdf",
+       *   path: "receipts/ticket.pdf"
+       * }
+       */
+
       if (!buffer) {
         const dataBase64 =
-          typeof body.dataBase64 ===
-          'string'
+          typeof body.dataBase64 === 'string'
             ? body.dataBase64
             : '';
 
@@ -1478,16 +1488,20 @@ app.post(
             );
 
           originalName =
-            typeof body.fileName ===
-            'string'
+            typeof body.fileName === 'string'
               ? body.fileName
-              : 'receipt';
+              : typeof body.filename === 'string'
+                ? body.filename
+                : 'receipt';
 
           mimeType =
-            typeof body.mimeType ===
-            'string'
+            typeof body.mimeType === 'string'
               ? body.mimeType
-              : '';
+              : typeof body.mime === 'string'
+                ? body.mime
+                : typeof body.contentType === 'string'
+                  ? body.contentType
+                  : '';
         }
       }
 
@@ -1508,44 +1522,200 @@ app.post(
         });
       }
 
+      /* =====================================================
+         DETERMINAR TIPO REAL DEL ARCHIVO
+         ===================================================== */
+
+      const requestedExt =
+        typeof body.ext === 'string'
+          ? body.ext
+              .trim()
+              .replace(/^\./, '')
+              .toLowerCase()
+          : '';
+
+      const normalizedMime =
+        mimeType
+          .split(';')[0]
+          .trim()
+          .toLowerCase();
+
+      /*
+       * Primero usamos el MIME recibido.
+       * Si no existe, usamos ext.
+       * Finalmente intentamos obtener la extensión
+       * del nombre original.
+       */
+
+      let finalExtension = '';
+
+      if (
+        normalizedMime ===
+        'application/pdf'
+      ) {
+        finalExtension = 'pdf';
+      } else if (
+        normalizedMime ===
+        'image/png'
+      ) {
+        finalExtension = 'png';
+      } else if (
+        normalizedMime ===
+          'image/webp'
+      ) {
+        finalExtension = 'webp';
+      } else if (
+        normalizedMime ===
+          'image/gif'
+      ) {
+        finalExtension = 'gif';
+      } else if (
+        normalizedMime ===
+          'image/jpeg' ||
+        normalizedMime ===
+          'image/jpg'
+      ) {
+        finalExtension = 'jpg';
+      } else if (
+        requestedExt
+      ) {
+        finalExtension =
+          requestedExt;
+      } else if (
+        originalName.includes('.')
+      ) {
+        finalExtension =
+          originalName
+            .split('.')
+            .pop()
+            ?.toLowerCase() || '';
+      }
+
+      /*
+       * Si todavía no sabemos la extensión,
+       * intentamos detectar PDF por sus bytes.
+       *
+       * Un PDF comienza normalmente con:
+       * %PDF-
+       */
+
+      if (
+        buffer.length >= 5 &&
+        buffer
+          .subarray(0, 5)
+          .toString('ascii') ===
+          '%PDF-'
+      ) {
+        finalExtension = 'pdf';
+        mimeType =
+          'application/pdf';
+      }
+
+      /*
+       * Fallback final para imágenes.
+       */
+
+      if (!finalExtension) {
+        finalExtension = 'jpg';
+      }
+
+      /* =====================================================
+         NORMALIZAR EXTENSIONES
+         ===================================================== */
+
+      if (
+        finalExtension ===
+          'jpeg'
+      ) {
+        finalExtension = 'jpg';
+      }
+
+      if (
+        finalExtension ===
+          'jpe'
+      ) {
+        finalExtension = 'jpg';
+      }
+
+      /* =====================================================
+         MIME FINAL
+         ===================================================== */
+
+      const finalMimeType =
+        mimeForPath(
+          `file.${finalExtension}`
+        );
+
+      /*
+       * Si mimeForPath no conoce el formato,
+       * conservamos el MIME recibido.
+       */
+
+      if (
+        finalMimeType !==
+        'application/octet-stream'
+      ) {
+        mimeType =
+          finalMimeType;
+      } else if (
+        !mimeType
+      ) {
+        mimeType =
+          'application/octet-stream';
+      }
+
+      /* =====================================================
+         NOMBRE SEGURO
+         ===================================================== */
+
       const safeName =
         String(
           originalName ||
-            'receipt'
+            `receipt.${finalExtension}`
         ).replace(
           /[^a-zA-Z0-9._-]/g,
           '_'
         );
 
-      const extension =
-        safeName.includes('.')
-          ? safeName
-              .split('.')
-              .pop()
-              ?.toLowerCase()
-          : '';
-
-      const finalExtension =
-        extension ||
-        (
-          mimeType ===
-          'application/pdf'
-            ? 'pdf'
-            : mimeType ===
-                'image/png'
-              ? 'png'
-              : 'jpg'
-        );
+      /* =====================================================
+         PATH DE GITHUB
+         ===================================================== */
 
       let requestedPath =
         typeof body.path ===
         'string'
-          ? body.path
+          ? body.path.trim()
           : '';
 
       if (!requestedPath) {
         requestedPath =
           `receipts/${Date.now()}-${crypto.randomUUID()}.${finalExtension}`;
+      } else {
+        /*
+         * Si el frontend manda un path sin extensión,
+         * agregamos la extensión correcta.
+         */
+
+        const pathHasExtension =
+          /\.[a-zA-Z0-9]+$/.test(
+            requestedPath
+          );
+
+        if (!pathHasExtension) {
+          requestedPath =
+            `${requestedPath}.${finalExtension}`;
+        } else {
+          /*
+           * Si el frontend mandó .jpg pero el archivo
+           * real es PDF, corregimos la extensión.
+           */
+
+          requestedPath =
+            requestedPath.replace(
+              /\.[a-zA-Z0-9]+$/,
+              `.${finalExtension}`
+            );
+        }
       }
 
       requestedPath =
@@ -1553,31 +1723,75 @@ app.post(
           requestedPath
         );
 
+      console.log(
+        'Upload:',
+        JSON.stringify({
+          originalName,
+          requestedExt,
+          originalMime: mimeType,
+          finalExtension,
+          finalMimeType: mimeForPath(
+            requestedPath
+          ),
+          size: buffer.length,
+          path: requestedPath,
+          pdfDetected:
+            buffer
+              .subarray(
+                0,
+                5
+              )
+              .toString(
+                'ascii'
+              ) === '%PDF-',
+        })
+      );
+
+      /* =====================================================
+         SUBIR A GITHUB
+         ===================================================== */
+
       const result =
         await uploadToGithub(
           requestedPath,
           buffer
         );
 
+      /* =====================================================
+         URL DEL RECEIPT
+         ===================================================== */
+
       const receiptUrl =
         `/receipt/${result.pathB64}`;
 
+      const absoluteUrl =
+        `${req.protocol}://${req.get('host')}${receiptUrl}`;
+
+      /* =====================================================
+         RESPUESTA
+         ===================================================== */
+
       return res.status(200).json({
         ok: true,
+
         ...result,
+
         mimeType:
-          mimeType ||
           mimeForPath(
             result.path
           ),
+
         size:
           buffer.length,
+
         url:
           receiptUrl,
+
         receiptUrl,
-        absoluteUrl:
-          `${req.protocol}://${req.get('host')}${receiptUrl}`,
+
+        absoluteUrl,
       });
+
     } catch (
       error: unknown
     ) {
