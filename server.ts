@@ -928,7 +928,187 @@ app.get(
     });
   }
 );
+/* =========================================================
+   UPLOAD
+   ========================================================= */
 
+app.post(
+  '/upload',
+  auth,
+  upload.single('file'),
+  async (
+    req: Request,
+    res: Response
+  ) => {
+    try {
+      let buffer:
+        | Buffer
+        | null =
+        req.file?.buffer || null;
+
+      let originalName =
+        req.file?.originalname ||
+        '';
+
+      let mimeType =
+        req.file?.mimetype ||
+        '';
+
+      const body =
+        getRequestBody(req);
+
+      /*
+       * También acepta:
+       *
+       * {
+       *   dataBase64: "...",
+       *   fileName: "ticket.pdf",
+       *   mimeType: "application/pdf"
+       * }
+       */
+
+      if (!buffer) {
+        const dataBase64 =
+          typeof body.dataBase64 ===
+          'string'
+            ? body.dataBase64
+            : '';
+
+        if (dataBase64) {
+          const clean =
+            dataBase64.replace(
+              /^data:[^;]+;base64,/i,
+              ''
+            );
+
+          buffer =
+            Buffer.from(
+              clean,
+              'base64'
+            );
+
+          originalName =
+            typeof body.fileName ===
+            'string'
+              ? body.fileName
+              : 'receipt';
+
+          mimeType =
+            typeof body.mimeType ===
+            'string'
+              ? body.mimeType
+              : '';
+        }
+      }
+
+      if (!buffer) {
+        return res.status(400).json({
+          error:
+            'Falta el archivo. Usá multipart/form-data con campo "file" o JSON con "dataBase64".',
+        });
+      }
+
+      if (
+        buffer.length >
+        MAX_UPLOAD_SIZE
+      ) {
+        return res.status(413).json({
+          error:
+            'El archivo supera el límite máximo de 20 MB.',
+        });
+      }
+
+      const safeName =
+        String(
+          originalName ||
+            'receipt'
+        ).replace(
+          /[^a-zA-Z0-9._-]/g,
+          '_'
+        );
+
+      const extension =
+        safeName.includes('.')
+          ? safeName
+              .split('.')
+              .pop()
+              ?.toLowerCase()
+          : '';
+
+      const finalExtension =
+        extension ||
+        (
+          mimeType ===
+          'application/pdf'
+            ? 'pdf'
+            : mimeType ===
+                'image/png'
+              ? 'png'
+              : 'jpg'
+        );
+
+      let requestedPath =
+        typeof body.path ===
+        'string'
+          ? body.path
+          : '';
+
+      if (!requestedPath) {
+        requestedPath =
+          `receipts/${Date.now()}-${crypto.randomUUID()}.${finalExtension}`;
+      }
+
+      requestedPath =
+        validateGithubPath(
+          requestedPath
+        );
+
+      const result =
+        await uploadToGithub(
+          requestedPath,
+          buffer
+        );
+
+      const receiptUrl =
+        `/receipt/${result.pathB64}`;
+
+      return res.status(200).json({
+        ok: true,
+        ...result,
+        mimeType:
+          mimeType ||
+          mimeForPath(
+            result.path
+          ),
+        size:
+          buffer.length,
+        url: receiptUrl,
+        receiptUrl,
+        absoluteUrl:
+          `${req.protocol}://${req.get('host')}${receiptUrl}`,
+      });
+    } catch (
+      error: unknown
+    ) {
+      console.error(
+        'Upload error:',
+        error
+      );
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      return res.status(500).json({
+        error:
+          'No se pudo subir el archivo.',
+        details:
+          message,
+      });
+    }
+  }
+);
 /* =========================================================
    GEMINI PROJECT COPY
    ========================================================= */
