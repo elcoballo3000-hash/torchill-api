@@ -1,4 +1,8 @@
-import express, { Request, Response } from 'express';
+import express, {
+  Request,
+  Response,
+  NextFunction,
+} from 'express';
 import cors from 'cors';
 import { GoogleGenAI } from '@google/genai';
 import multer from 'multer';
@@ -24,9 +28,6 @@ const API_TOKEN =
 
 /*
  * Tamaño máximo permitido para archivos.
- *
- * Se mantiene en 20 MB para no romper
- * el comportamiento existente.
  */
 const MAX_UPLOAD_SIZE =
   20 * 1024 * 1024;
@@ -428,9 +429,11 @@ function parseGeminiJson(
       );
 
     if (objectMatch) {
-      return JSON.parse(
-        objectMatch[0]
-      );
+      try {
+        return JSON.parse(
+          objectMatch[0]
+        );
+      } catch {}
     }
 
     const arrayMatch =
@@ -439,9 +442,11 @@ function parseGeminiJson(
       );
 
     if (arrayMatch) {
-      return JSON.parse(
-        arrayMatch[0]
-      );
+      try {
+        return JSON.parse(
+          arrayMatch[0]
+        );
+      } catch {}
     }
 
     throw new Error(
@@ -457,20 +462,21 @@ function parseGeminiJson(
 function auth(
   req: Request,
   res: Response,
-  next: () => void
+  next: NextFunction
 ) {
   if (!API_TOKEN) {
     return next();
   }
 
+  const authorization =
+    req.headers.authorization ||
+    '';
+
   const sent =
     req.headers[
       'x-api-key'
     ] ||
-    (
-      req.headers.authorization ||
-      ''
-    ).replace(
+    authorization.replace(
       /^Bearer\s+/i,
       ''
     );
@@ -853,7 +859,49 @@ function mimeForPath(
     return 'image/jpeg';
   }
 
+  if (
+    lower.endsWith('.bmp')
+  ) {
+    return 'image/bmp';
+  }
+
   return 'application/octet-stream';
+}
+
+/* =========================================================
+   DETECTAR MIME TYPE DESDE URL / HEADER
+   ========================================================= */
+
+function getMimeType(
+  fileUrl: string,
+  contentType: string
+): string {
+  const normalizedContentType =
+    contentType
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+
+  if (
+    normalizedContentType &&
+    normalizedContentType !==
+      'application/octet-stream'
+  ) {
+    return normalizedContentType;
+  }
+
+  try {
+    const parsed =
+      new URL(
+        fileUrl
+      );
+
+    return mimeForPath(
+      parsed.pathname
+    );
+  } catch {
+    return 'application/octet-stream';
+  }
 }
 
 /* =========================================================
@@ -888,14 +936,26 @@ async function downloadGithubFile(
     `/${encodeURIComponent(repo)}/contents/${encodedPath}` +
     `?ref=${encodeURIComponent(branch)}`;
 
+  /*
+   * Pedimos el archivo como contenido RAW.
+   *
+   * Esto evita depender del campo "content" de la API
+   * de GitHub, que puede no estar disponible para archivos
+   * grandes.
+   */
+
   const response =
     await fetch(
       url,
       {
-        headers:
-          githubHeaders(
-            token
-          ),
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
+          Accept:
+            'application/vnd.github.raw',
+          'X-GitHub-Api-Version':
+            '2022-11-28',
+        },
       }
     );
 
@@ -917,30 +977,12 @@ async function downloadGithubFile(
     );
   }
 
-  const result =
-    await response.json();
-
-  if (
-    result.type !==
-    'file' ||
-    typeof result.content !==
-      'string'
-  ) {
-    throw new Error(
-      'GitHub no devolvió un archivo válido.'
-    );
-  }
-
-  const cleanBase64 =
-    result.content.replace(
-      /\s/g,
-      ''
-    );
+  const arrayBuffer =
+    await response.arrayBuffer();
 
   const buffer =
     Buffer.from(
-      cleanBase64,
-      'base64'
+      arrayBuffer
     );
 
   if (
@@ -998,7 +1040,8 @@ async function pdfFirstPageToPng(
         scale: 1,
       });
 
-    const maxSide = 1600;
+    const maxSide =
+      1600;
 
     const scale =
       Math.min(
@@ -1045,7 +1088,7 @@ async function pdfFirstPageToPng(
 }
 
 /* =========================================================
-   DESCARGAR RECEIPT
+   DESCARGAR RECEIPT DESDE URL
    ========================================================= */
 
 async function downloadReceipt(
@@ -1164,70 +1207,7 @@ async function downloadReceipt(
           )
       )
     );
-/* =========================================================
-   DETECTAR MIME TYPE DESDE URL / CONTENT-TYPE
-   ========================================================= */
 
-function getMimeType(
-  fileUrl: string,
-  contentType: string
-): string {
-  const detected =
-    contentType
-      .split(';')[0]
-      .trim()
-      .toLowerCase();
-
-  if (
-    detected &&
-    detected !==
-      'application/octet-stream'
-  ) {
-    return detected;
-  }
-
-  const lowerUrl =
-    fileUrl.toLowerCase();
-
-  if (
-    lowerUrl.includes('.pdf')
-  ) {
-    return 'application/pdf';
-  }
-
-  if (
-    lowerUrl.includes('.png')
-  ) {
-    return 'image/png';
-  }
-
-  if (
-    lowerUrl.includes('.webp')
-  ) {
-    return 'image/webp';
-  }
-
-  if (
-    lowerUrl.includes('.gif')
-  ) {
-    return 'image/gif';
-  }
-
-  if (
-    lowerUrl.includes('.svg')
-  ) {
-    return 'image/svg+xml';
-  }
-
-  if (
-    lowerUrl.includes('.jpg') ||
-    lowerUrl.includes('.jpeg')
-  ) {
-    return 'image/jpeg';
-  }
-
-  return 'image/jpeg';
-}
   const mimeType =
     getMimeType(
       fileUrl,
@@ -1484,7 +1464,13 @@ app.post(
             : mimeType ===
                 'image/png'
               ? 'png'
-              : 'jpg'
+              : mimeType ===
+                  'image/webp'
+                ? 'webp'
+                : mimeType ===
+                    'image/gif'
+                  ? 'gif'
+                  : 'jpg'
         );
 
       let requestedPath =
@@ -1961,13 +1947,6 @@ app.post(
          2. PDF -> PNG
          =================================================== */
 
-      /*
-       * Esta era la parte que faltaba en el código anterior.
-       *
-       * Si el archivo es PDF, convertimos únicamente
-       * la primera página a PNG antes de mandarla a Gemini.
-       */
-
       if (
         mimeType ===
         'application/pdf'
@@ -1997,11 +1976,6 @@ app.post(
             pdfError
           );
 
-          /*
-           * No mandamos el PDF nativo si la conversión
-           * falla silenciosamente. Devolvemos un error
-           * claro para que Base44 pueda informar el problema.
-           */
           return res.status(422).json({
             error:
               'No se pudo convertir el PDF a imagen.',
@@ -2015,13 +1989,41 @@ app.post(
         }
       }
 
+      /* ===================================================
+         3. VALIDAR TIPO DE ARCHIVO
+         =================================================== */
+
+      const allowedMimeTypes = [
+        'image/jpeg',
+        'image/png',
+        'image/webp',
+        'image/gif',
+        'image/bmp',
+      ];
+
+      if (
+        !allowedMimeTypes.includes(
+          mimeType
+        )
+      ) {
+        return res.status(415).json({
+          error:
+            'El archivo debe ser un PDF o una imagen compatible.',
+          mimeType,
+        });
+      }
+
+      /* ===================================================
+         4. BASE64
+         =================================================== */
+
       const base64 =
         buffer.toString(
           'base64'
         );
 
       /* ===================================================
-         3. ANALIZAR CON GEMINI
+         5. ANALIZAR CON GEMINI
          =================================================== */
 
       const geminiPrompt = `
@@ -2081,7 +2083,7 @@ IMPORTANTE:
       }
 
       /* ===================================================
-         4. PARSEAR JSON
+         6. PARSEAR JSON
          =================================================== */
 
       const parsed =
@@ -2142,6 +2144,36 @@ app.use(
     return res.status(404).json({
       error:
         'Endpoint no encontrado.',
+    });
+  }
+);
+
+/* =========================================================
+   ERROR HANDLER
+   ========================================================= */
+
+app.use(
+  (
+    error: unknown,
+    _req: Request,
+    res: Response,
+    _next: NextFunction
+  ) => {
+    console.error(
+      'Unhandled server error:',
+      error
+    );
+
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    return res.status(500).json({
+      error:
+        'Error interno del servidor.',
+      details:
+        message,
     });
   }
 );
