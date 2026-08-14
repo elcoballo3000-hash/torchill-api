@@ -43,22 +43,8 @@ interface DownloadedFile {
    PDF.JS / CANVAS
    ========================================================= */
 
-/*
- * pdfjs-dist puede necesitar estos objetos globales
- * cuando corre en Node.
- *
- * IMPORTANTE:
- * No importamos Path2D desde "canvas" porque las versiones
- * actuales de @types/canvas no lo exponen correctamente.
- */
-
 (globalThis as any).DOMMatrix = DOMMatrix;
 (globalThis as any).ImageData = ImageData;
-
-/*
- * @napi-rs/canvas sí dispone de Path2D.
- * Lo usamos solamente si está disponible.
- */
 
 if (
   !(globalThis as any).Path2D &&
@@ -111,19 +97,6 @@ const upload = multer({
    CORS
    ========================================================= */
 
-/*
- * No usamos:
- *
- * app.options('*', ...)
- *
- * porque Express 5 / path-to-regexp genera:
- *
- * Missing parameter name at index 1: *
- *
- * El middleware cors ya responde correctamente
- * a las solicitudes OPTIONS.
- */
-
 app.use(
   cors({
     origin: true,
@@ -147,6 +120,19 @@ app.use(
     maxAge: 86400,
   })
 );
+
+/*
+ * IMPORTANTE:
+ *
+ * NO usar:
+ *
+ * app.options('*', ...)
+ *
+ * porque Express 5 / path-to-regexp
+ * produce:
+ *
+ * Missing parameter name at index 1: *
+ */
 
 /* =========================================================
    BODY PARSERS
@@ -239,6 +225,7 @@ let currentKeyIndex = 0;
 
 function getAvailableKey():
   KeyState | null {
+
   if (
     keyStates.length === 0
   ) {
@@ -288,6 +275,7 @@ function blockKey(
   keyState: KeyState,
   retryAfterMs: number
 ): void {
+
   keyState.blockedUntil =
     Date.now() +
     Math.max(
@@ -303,6 +291,7 @@ function blockKey(
 function getRetryAfterMs(
   error: unknown
 ): number {
+
   const message =
     error instanceof Error
       ? error.message
@@ -317,12 +306,16 @@ function getRetryAfterMs(
   for (
     const pattern of patterns
   ) {
+
     const match =
       message.match(
         pattern
       );
 
-    if (match) {
+    if (
+      match
+    ) {
+
       const seconds =
         Number.parseFloat(
           match[1]
@@ -351,6 +344,7 @@ function getRetryAfterMs(
 function isRateLimitError(
   error: unknown
 ): boolean {
+
   const message =
     error instanceof Error
       ? error.message
@@ -393,6 +387,7 @@ async function runGemini<T>(
     ai: GoogleGenAI
   ) => Promise<T>
 ): Promise<T> {
+
   if (
     keyStates.length === 0
   ) {
@@ -409,6 +404,7 @@ async function runGemini<T>(
     attempt < keyStates.length;
     attempt++
   ) {
+
     const keyState =
       getAvailableKey();
 
@@ -431,6 +427,7 @@ async function runGemini<T>(
     );
 
     try {
+
       console.log(
         `Gemini: usando API key ${keyState.keyNumber}`
       );
@@ -441,9 +438,11 @@ async function runGemini<T>(
         );
 
       return result;
+
     } catch (
       error: unknown
     ) {
+
       if (
         !isRateLimitError(
           error
@@ -481,10 +480,8 @@ async function runGemini<T>(
 
 function getRequestBody(
   req: Request
-): Record<
-  string,
-  any
-> {
+): Record<string, any> {
+
   let body: unknown =
     req.body;
 
@@ -492,6 +489,7 @@ function getRequestBody(
     typeof body ===
     'string'
   ) {
+
     if (
       body.trim().length ===
       0
@@ -500,11 +498,14 @@ function getRequestBody(
     }
 
     try {
+
       body =
         JSON.parse(
           body
         );
+
     } catch {
+
       return {};
     }
   }
@@ -534,6 +535,7 @@ function getParamString(
     | string[]
     | undefined
 ): string {
+
   if (
     typeof value ===
     'string'
@@ -557,6 +559,7 @@ function getParamString(
 function parseGeminiJson(
   text: string
 ): any {
+
   const cleaned =
     text
       .trim()
@@ -575,9 +578,11 @@ function parseGeminiJson(
       .trim();
 
   try {
+
     return JSON.parse(
       cleaned
     );
+
   } catch {}
 
   const objectMatch =
@@ -588,10 +593,13 @@ function parseGeminiJson(
   if (
     objectMatch
   ) {
+
     try {
+
       return JSON.parse(
         objectMatch[0]
       );
+
     } catch {}
   }
 
@@ -603,10 +611,13 @@ function parseGeminiJson(
   if (
     arrayMatch
   ) {
+
     try {
+
       return JSON.parse(
         arrayMatch[0]
       );
+
     } catch {}
   }
 
@@ -624,9 +635,10 @@ function auth(
   res: Response,
   next: NextFunction
 ) {
+
   /*
-   * Si API_TOKEN no está configurado,
-   * no bloqueamos el endpoint.
+   * Si API_TOKEN no existe,
+   * no bloqueamos la petición.
    */
 
   if (
@@ -656,6 +668,7 @@ function auth(
   if (
     sent !== API_TOKEN
   ) {
+
     return res
       .status(401)
       .json({
@@ -672,6 +685,7 @@ function auth(
    ========================================================= */
 
 function ghConfig() {
+
   const owner =
     process.env.GITHUB_OWNER?.trim();
 
@@ -690,6 +704,7 @@ function ghConfig() {
     !repo ||
     !token
   ) {
+
     throw new Error(
       'Faltan GITHUB_OWNER, GITHUB_REPO o GITHUB_TOKEN en Render.'
     );
@@ -710,6 +725,7 @@ function ghConfig() {
 function validateGithubPath(
   path: string
 ): string {
+
   const normalized =
     path
       .replace(
@@ -734,6 +750,7 @@ function validateGithubPath(
       '\0'
     )
   ) {
+
     throw new Error(
       'Ruta de archivo inválida.'
     );
@@ -749,6 +766,7 @@ function validateGithubPath(
 function encodePathForGithub(
   path: string
 ): string {
+
   return path
     .split('/')
     .map(
@@ -767,6 +785,7 @@ function encodePathForGithub(
 function encodePathB64(
   path: string
 ): string {
+
   return Buffer.from(
     path,
     'utf8'
@@ -789,6 +808,7 @@ function encodePathB64(
 function decodePathB64(
   value: string
 ): string {
+
   let normalized =
     value
       .replace(
@@ -805,6 +825,7 @@ function decodePathB64(
       4 !==
     0
   ) {
+
     normalized += '=';
   }
 
@@ -828,7 +849,9 @@ function decodePathB64(
 function githubHeaders(
   token: string
 ) {
+
   return {
+
     Authorization:
       `Bearer ${token}`,
 
@@ -853,6 +876,7 @@ function githubHeaders(
 async function getGithubFile(
   path: string
 ) {
+
   const {
     owner,
     repo,
@@ -885,6 +909,7 @@ async function getGithubFile(
       url,
       {
         method: 'GET',
+
         headers:
           githubHeaders(
             token
@@ -902,6 +927,7 @@ async function getGithubFile(
   if (
     !response.ok
   ) {
+
     const text =
       await response.text();
 
@@ -921,6 +947,7 @@ async function uploadToGithub(
   path: string,
   data: Buffer
 ) {
+
   const {
     owner,
     repo,
@@ -938,6 +965,7 @@ async function uploadToGithub(
     data.length >
     MAX_UPLOAD_SIZE
   ) {
+
     throw new Error(
       'El archivo supera el límite máximo de 20 MB.'
     );
@@ -961,6 +989,7 @@ async function uploadToGithub(
     string,
     any
   > = {
+
     message:
       `Torchill receipt upload: ${safePath}`,
 
@@ -977,6 +1006,7 @@ async function uploadToGithub(
     typeof existing.sha ===
       'string'
   ) {
+
     body.sha =
       existing.sha;
   }
@@ -1002,6 +1032,7 @@ async function uploadToGithub(
   if (
     !response.ok
   ) {
+
     const text =
       await response.text();
 
@@ -1014,6 +1045,7 @@ async function uploadToGithub(
     await response.json();
 
   return {
+
     path:
       safePath,
 
@@ -1041,6 +1073,7 @@ async function uploadToGithub(
 function mimeForPath(
   path: string
 ): string {
+
   const lower =
     path.toLowerCase();
 
@@ -1092,6 +1125,7 @@ function getMimeType(
   fileUrl: string,
   contentType: string
 ): string {
+
   const normalized =
     contentType
       .split(';')[0]
@@ -1103,10 +1137,12 @@ function getMimeType(
     normalized !==
       'application/octet-stream'
   ) {
+
     return normalized;
   }
 
   try {
+
     const parsed =
       new URL(
         fileUrl
@@ -1115,7 +1151,9 @@ function getMimeType(
     return mimeForPath(
       parsed.pathname
     );
+
   } catch {
+
     return 'application/octet-stream';
   }
 }
@@ -1127,6 +1165,7 @@ function getMimeType(
 async function downloadGithubFile(
   path: string
 ): Promise<DownloadedFile> {
+
   const {
     owner,
     repo,
@@ -1171,6 +1210,7 @@ async function downloadGithubFile(
     response.status ===
     404
   ) {
+
     throw new Error(
       'Archivo no encontrado en GitHub.'
     );
@@ -1179,6 +1219,7 @@ async function downloadGithubFile(
   if (
     !response.ok
   ) {
+
     const text =
       await response.text();
 
@@ -1196,6 +1237,7 @@ async function downloadGithubFile(
     typeof result.content !==
       'string'
   ) {
+
     throw new Error(
       'GitHub no devolvió un archivo válido.'
     );
@@ -1217,12 +1259,14 @@ async function downloadGithubFile(
     buffer.length >
     MAX_RECEIPT_FILE_SIZE
   ) {
+
     throw new Error(
       'El archivo supera el límite máximo de 20 MB.'
     );
   }
 
   return {
+
     buffer,
 
     mimeType:
@@ -1239,8 +1283,10 @@ async function downloadGithubFile(
 async function pdfFirstPageToPng(
   buffer: Buffer
 ): Promise<Buffer> {
+
   const loadingTask =
     pdfjsLib.getDocument({
+
       data:
         new Uint8Array(
           buffer
@@ -1257,10 +1303,12 @@ async function pdfFirstPageToPng(
     await loadingTask.promise;
 
   try {
+
     if (
       pdf.numPages <
       1
     ) {
+
       throw new Error(
         'El PDF no contiene páginas.'
       );
@@ -1310,16 +1358,20 @@ async function pdfFirstPageToPng(
       );
 
     await page.render({
+
       canvasContext:
         context as any,
 
       viewport,
+
     }).promise;
 
     return canvas.toBuffer(
       'image/png'
     );
+
   } finally {
+
     await pdf.destroy();
   }
 }
@@ -1331,14 +1383,18 @@ async function pdfFirstPageToPng(
 async function downloadReceipt(
   fileUrl: string
 ): Promise<DownloadedFile> {
+
   let parsedUrl: URL;
 
   try {
+
     parsedUrl =
       new URL(
         fileUrl
       );
+
   } catch {
+
     throw new Error(
       'fileUrl no es una URL válida.'
     );
@@ -1350,6 +1406,7 @@ async function downloadReceipt(
     parsedUrl.protocol !==
       'https:'
   ) {
+
     throw new Error(
       'fileUrl debe utilizar HTTP o HTTPS.'
     );
@@ -1363,6 +1420,7 @@ async function downloadReceipt(
   if (
     !fileRes.ok
   ) {
+
     throw new Error(
       `No se pudo descargar el archivo (${fileRes.status}).`
     );
@@ -1378,6 +1436,7 @@ async function downloadReceipt(
     Number(contentLength) >
       MAX_RECEIPT_FILE_SIZE
   ) {
+
     throw new Error(
       'El archivo supera el límite máximo de 20 MB.'
     );
@@ -1386,6 +1445,7 @@ async function downloadReceipt(
   if (
     !fileRes.body
   ) {
+
     throw new Error(
       'La respuesta no contiene datos.'
     );
@@ -1400,9 +1460,11 @@ async function downloadReceipt(
   let total = 0;
 
   try {
+
     while (
       true
     ) {
+
       const {
         done,
         value,
@@ -1418,6 +1480,7 @@ async function downloadReceipt(
       if (
         value
       ) {
+
         total +=
           value.length;
 
@@ -1425,6 +1488,7 @@ async function downloadReceipt(
           total >
           MAX_RECEIPT_FILE_SIZE
         ) {
+
           try {
             await reader.cancel();
           } catch {}
@@ -1439,7 +1503,9 @@ async function downloadReceipt(
         );
       }
     }
+
   } finally {
+
     reader.releaseLock();
   }
 
@@ -1477,7 +1543,9 @@ app.get(
     req: Request,
     res: Response
   ) => {
+
     try {
+
       const pathB64 =
         getParamString(
           req.params.pathB64
@@ -1486,6 +1554,7 @@ app.get(
       if (
         !pathB64
       ) {
+
         return res
           .status(400)
           .json({
@@ -1527,9 +1596,11 @@ app.get(
       return res
         .status(200)
         .send(buffer);
+
     } catch (
       error: unknown
     ) {
+
       console.error(
         'Receipt download error:',
         error
@@ -1543,6 +1614,7 @@ app.get(
       return res
         .status(404)
         .json({
+
           error:
             'No se pudo obtener el archivo.',
 
@@ -1563,9 +1635,11 @@ app.get(
     _req: Request,
     res: Response
   ) => {
+
     return res
       .status(200)
       .json({
+
         ok: true,
 
         service:
@@ -1592,6 +1666,9 @@ app.get(
             process.env.GITHUB_TOKEN
           ),
 
+        generateText:
+          true,
+
         node:
           process.version,
 
@@ -1611,9 +1688,11 @@ app.get(
     _req: Request,
     res: Response
   ) => {
+
     return res
       .status(200)
       .json({
+
         status:
           'ok',
 
@@ -1637,6 +1716,363 @@ app.get(
 );
 
 /* =========================================================
+   GENERATE TEXT
+   =========================================================
+   
+   NUEVO ENDPOINT
+   
+   POST /generate-text
+
+   Acepta por ejemplo:
+
+   {
+     "prompt": "Escribe una interpretación...",
+     "language": "español"
+   }
+
+   También acepta:
+
+   {
+     "text": "...",
+     "prompt": "...",
+     "language": "...",
+     "context": "...",
+     "systemPrompt": "...",
+     "temperature": 0.7,
+     "maxOutputTokens": 2000
+   }
+
+   Respuesta:
+
+   {
+     "ok": true,
+     "text": "...",
+     "model": "...",
+     "keyNumber": 1
+   }
+
+   ========================================================= */
+
+app.post(
+  '/generate-text',
+  async (
+    req: Request,
+    res: Response
+  ) => {
+
+    try {
+
+      if (
+        apiKeys.length ===
+        0
+      ) {
+
+        return res
+          .status(503)
+          .json({
+
+            ok: false,
+
+            error:
+              'El servicio Gemini no está configurado.',
+          });
+      }
+
+      const body =
+        getRequestBody(
+          req
+        );
+
+      const prompt =
+        typeof body.prompt ===
+        'string'
+          ? body.prompt.trim()
+          : '';
+
+      const text =
+        typeof body.text ===
+        'string'
+          ? body.text.trim()
+          : '';
+
+      const language =
+        typeof body.language ===
+        'string'
+          ? body.language.trim()
+          : '';
+
+      const context =
+        typeof body.context ===
+        'string'
+          ? body.context.trim()
+          : '';
+
+      const systemPrompt =
+        typeof body.systemPrompt ===
+        'string'
+          ? body.systemPrompt.trim()
+          : '';
+
+      /*
+       * Permitir que Base44 mande solamente "prompt"
+       * o solamente "text".
+       */
+
+      const userInput =
+        prompt ||
+        text;
+
+      if (
+        !userInput
+      ) {
+
+        return res
+          .status(400)
+          .json({
+
+            ok: false,
+
+            error:
+              'Falta "prompt" o "text".',
+
+            expected:
+              '{"prompt":"Texto que debe procesar Gemini"}',
+          });
+      }
+
+      /*
+       * Temperatura segura.
+       */
+
+      let temperature =
+        Number(
+          body.temperature
+        );
+
+      if (
+        !Number.isFinite(
+          temperature
+        )
+      ) {
+        temperature =
+          0.7;
+      }
+
+      temperature =
+        Math.max(
+          0,
+          Math.min(
+            2,
+            temperature
+          )
+        );
+
+      /*
+       * Máximo de tokens.
+       */
+
+      let maxOutputTokens =
+        Number(
+          body.maxOutputTokens
+        );
+
+      if (
+        !Number.isFinite(
+          maxOutputTokens
+        )
+      ) {
+        maxOutputTokens =
+          4096;
+      }
+
+      maxOutputTokens =
+        Math.max(
+          1,
+          Math.min(
+            8192,
+            Math.floor(
+              maxOutputTokens
+            )
+          )
+        );
+
+      /*
+       * Construcción del prompt.
+       */
+
+      let finalPrompt =
+        '';
+
+      if (
+        systemPrompt
+      ) {
+
+        finalPrompt +=
+          `${systemPrompt}\n\n`;
+      }
+
+      if (
+        language
+      ) {
+
+        finalPrompt +=
+          `Idioma de respuesta: ${language}\n\n`;
+      }
+
+      if (
+        context
+      ) {
+
+        finalPrompt +=
+          `Contexto:\n${context}\n\n`;
+      }
+
+      finalPrompt +=
+        userInput;
+
+      console.log(
+        'Generate text:',
+        {
+          language:
+            language ||
+            'no especificado',
+
+          promptLength:
+            finalPrompt.length,
+
+          temperature,
+
+          maxOutputTokens,
+        }
+      );
+
+      /*
+       * Gemini.
+       */
+
+      const response =
+        await runGemini(
+          (ai) =>
+            ai.models.generateContent(
+              {
+                model:
+                  modelName,
+
+                contents:
+                  [
+                    {
+                      role:
+                        'user',
+
+                      parts:
+                        [
+                          {
+                            text:
+                              finalPrompt,
+                          },
+                        ],
+                    },
+                  ],
+
+                config:
+                  {
+                    temperature,
+
+                    maxOutputTokens,
+                  },
+              }
+            )
+        );
+
+      const generatedText =
+        response.text
+          ?.trim() ||
+        '';
+
+      if (
+        !generatedText
+      ) {
+
+        throw new Error(
+          'Gemini devolvió una respuesta vacía.'
+        );
+      }
+
+      return res
+        .status(200)
+        .json({
+
+          ok: true,
+
+          text:
+            generatedText,
+
+          response:
+            generatedText,
+
+          model:
+            modelName,
+
+          timestamp:
+            new Date().toISOString(),
+        });
+
+    } catch (
+      error: unknown
+    ) {
+
+      console.error(
+        'Generate text error:',
+        error
+      );
+
+      if (
+        isRateLimitError(
+          error
+        )
+      ) {
+
+        return res
+          .status(429)
+          .json({
+
+            ok: false,
+
+            error:
+              'Todas las API keys de Gemini están temporalmente limitadas.',
+
+            retryable:
+              true,
+
+            retryAfter:
+              getRetryAfterMs(
+                error
+              ),
+          });
+      }
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      return res
+        .status(500)
+        .json({
+
+          ok: false,
+
+          error:
+            'Error generando el texto con Gemini.',
+
+          details:
+            message,
+        });
+    }
+  }
+);
+
+/* =========================================================
    UPLOAD
    ========================================================= */
 
@@ -1650,7 +2086,9 @@ app.post(
     req: Request,
     res: Response
   ) => {
+
     try {
+
       let buffer:
         | Buffer
         | null =
@@ -1677,6 +2115,7 @@ app.post(
       if (
         !buffer
       ) {
+
         const dataBase64 =
           typeof body.dataBase64 ===
           'string'
@@ -1686,6 +2125,7 @@ app.post(
         if (
           dataBase64
         ) {
+
           const clean =
             dataBase64.replace(
               /^data:[^;]+;base64,/i,
@@ -1693,15 +2133,19 @@ app.post(
             );
 
           try {
+
             buffer =
               Buffer.from(
                 clean,
                 'base64'
               );
+
           } catch {
+
             return res
               .status(400)
               .json({
+
                 error:
                   'dataBase64 inválido.',
               });
@@ -1733,9 +2177,11 @@ app.post(
       if (
         !buffer
       ) {
+
         return res
           .status(400)
           .json({
+
             error:
               'Falta el archivo. Usá multipart/form-data con campo "file" o JSON con "dataBase64".',
           });
@@ -1745,9 +2191,11 @@ app.post(
         buffer.length >
         MAX_UPLOAD_SIZE
       ) {
+
         return res
           .status(413)
           .json({
+
             error:
               'El archivo supera el límite máximo de 20 MB.',
           });
@@ -1782,44 +2230,57 @@ app.post(
         normalizedMime ===
         'application/pdf'
       ) {
+
         finalExtension =
           'pdf';
+
       } else if (
         normalizedMime ===
         'image/png'
       ) {
+
         finalExtension =
           'png';
+
       } else if (
         normalizedMime ===
         'image/webp'
       ) {
+
         finalExtension =
           'webp';
+
       } else if (
         normalizedMime ===
         'image/gif'
       ) {
+
         finalExtension =
           'gif';
+
       } else if (
         normalizedMime ===
           'image/jpeg' ||
         normalizedMime ===
           'image/jpg'
       ) {
+
         finalExtension =
           'jpg';
+
       } else if (
         requestedExt
       ) {
+
         finalExtension =
           requestedExt;
+
       } else if (
         originalName.includes(
           '.'
         )
       ) {
+
         finalExtension =
           originalName
             .split('.')
@@ -1847,6 +2308,7 @@ app.post(
       if (
         isPdf
       ) {
+
         finalExtension =
           'pdf';
 
@@ -1857,6 +2319,7 @@ app.post(
       if (
         !finalExtension
       ) {
+
         finalExtension =
           'jpg';
       }
@@ -1867,6 +2330,7 @@ app.post(
         finalExtension ===
           'jpe'
       ) {
+
         finalExtension =
           'jpg';
       }
@@ -1891,9 +2355,11 @@ app.post(
           finalExtension
         )
       ) {
+
         return res
           .status(400)
           .json({
+
             error:
               `Tipo de archivo no permitido: .${finalExtension}`,
           });
@@ -1912,6 +2378,7 @@ app.post(
         finalMimeType !==
         'application/octet-stream'
       ) {
+
         mimeType =
           finalMimeType;
       }
@@ -1929,9 +2396,12 @@ app.post(
       if (
         !requestedPath
       ) {
+
         requestedPath =
           `receipts/${Date.now()}-${crypto.randomUUID()}.${finalExtension}`;
+
       } else {
+
         requestedPath =
           validateGithubPath(
             requestedPath
@@ -1945,9 +2415,12 @@ app.post(
         if (
           !hasExtension
         ) {
+
           requestedPath =
             `${requestedPath}.${finalExtension}`;
+
         } else {
+
           requestedPath =
             requestedPath.replace(
               /\.[a-zA-Z0-9]+$/,
@@ -2019,6 +2492,7 @@ app.post(
       return res
         .status(200)
         .json({
+
           ok: true,
 
           ...result,
@@ -2038,9 +2512,11 @@ app.post(
 
           absoluteUrl,
         });
+
     } catch (
       error: unknown
     ) {
+
       console.error(
         'Upload error:',
         error
@@ -2054,6 +2530,7 @@ app.post(
       return res
         .status(500)
         .json({
+
           error:
             'No se pudo subir el archivo.',
 
@@ -2074,14 +2551,18 @@ app.post(
     req: Request,
     res: Response
   ) => {
+
     try {
+
       if (
         apiKeys.length ===
         0
       ) {
+
         return res
           .status(503)
           .json({
+
             error:
               'El servicio Gemini no está configurado.',
           });
@@ -2106,9 +2587,11 @@ app.post(
         ).length ===
         0
       ) {
+
         return res
           .status(400)
           .json({
+
             error:
               'La solicitud no contiene un body JSON válido.',
 
@@ -2125,14 +2608,17 @@ app.post(
         action ===
         'translate'
       ) {
+
         if (
           !Array.isArray(
             segments
           )
         ) {
+
           return res
             .status(400)
             .json({
+
               error:
                 '"segments" debe ser un array.',
             });
@@ -2142,9 +2628,11 @@ app.post(
           segments.length ===
           0
         ) {
+
           return res
             .status(400)
             .json({
+
               error:
                 '"segments" no puede estar vacío.',
             });
@@ -2241,6 +2729,7 @@ Devuelve exclusivamente JSON válido con esta estructura:
         if (
           !output
         ) {
+
           throw new Error(
             'Gemini devolvió una respuesta vacía.'
           );
@@ -2269,9 +2758,11 @@ Devuelve exclusivamente JSON válido con esta estructura:
           .length ===
           0
       ) {
+
         return res
           .status(400)
           .json({
+
             error:
               'Falta el campo "title".',
           });
@@ -2284,9 +2775,11 @@ Devuelve exclusivamente JSON válido con esta estructura:
           .length ===
           0
       ) {
+
         return res
           .status(400)
           .json({
+
             error:
               'Falta el campo "text".',
           });
@@ -2434,6 +2927,7 @@ Devuelve exclusivamente JSON válido con esta estructura:
       if (
         !output
       ) {
+
         throw new Error(
           'Gemini devolvió una respuesta vacía.'
         );
@@ -2449,9 +2943,11 @@ Devuelve exclusivamente JSON válido con esta estructura:
         .json(
           result
         );
+
     } catch (
       error: unknown
     ) {
+
       console.error(
         'Gemini project-copy error:',
         error
@@ -2462,9 +2958,11 @@ Devuelve exclusivamente JSON válido con esta estructura:
           error
         )
       ) {
+
         return res
           .status(429)
           .json({
+
             error:
               'Todas las API keys de Gemini están temporalmente limitadas.',
 
@@ -2486,6 +2984,7 @@ Devuelve exclusivamente JSON válido con esta estructura:
       return res
         .status(500)
         .json({
+
           error:
             'Error procesando la solicitud con Gemini.',
 
@@ -2507,14 +3006,18 @@ app.post(
     req: Request,
     res: Response
   ) => {
+
     try {
+
       if (
         apiKeys.length ===
         0
       ) {
+
         return res
           .status(503)
           .json({
+
             error:
               'El servicio Gemini no está configurado.',
           });
@@ -2537,9 +3040,11 @@ app.post(
           .length ===
           0
       ) {
+
         return res
           .status(400)
           .json({
+
             error:
               'fileUrl es requerido.',
           });
@@ -2552,9 +3057,11 @@ app.post(
           .length ===
           0
       ) {
+
         return res
           .status(400)
           .json({
+
             error:
               'prompt es requerido.',
           });
@@ -2584,11 +3091,13 @@ app.post(
         mimeType ===
         'application/pdf'
       ) {
+
         console.log(
           'Receipt: PDF detectado. Convirtiendo primera página a PNG...'
         );
 
         try {
+
           const png =
             await pdfFirstPageToPng(
               buffer
@@ -2603,9 +3112,11 @@ app.post(
           console.log(
             `Receipt: PDF convertido a PNG (${buffer.length} bytes)`
           );
+
         } catch (
           pdfError
         ) {
+
           console.error(
             'Receipt PDF conversion error:',
             pdfError
@@ -2614,6 +3125,7 @@ app.post(
           return res
             .status(422)
             .json({
+
               error:
                 'No se pudo convertir el PDF a imagen.',
 
@@ -2701,6 +3213,7 @@ IMPORTANTE:
       if (
         !text
       ) {
+
         throw new Error(
           'Gemini devolvió una respuesta vacía.'
         );
@@ -2718,6 +3231,7 @@ IMPORTANTE:
       return res
         .status(200)
         .json({
+
           ok: true,
 
           detected:
@@ -2726,9 +3240,11 @@ IMPORTANTE:
           raw:
             text,
         });
+
     } catch (
       error: unknown
     ) {
+
       console.error(
         'Analyze receipt error:',
         error
@@ -2739,9 +3255,11 @@ IMPORTANTE:
           error
         )
       ) {
+
         return res
           .status(429)
           .json({
+
             error:
               'Todas las API keys de Gemini están temporalmente limitadas.',
 
@@ -2763,6 +3281,7 @@ IMPORTANTE:
       return res
         .status(500)
         .json({
+
           error:
             'Error analizando el comprobante.',
 
@@ -2784,17 +3303,21 @@ app.use(
     res: Response,
     next: NextFunction
   ) => {
+
     if (
       error instanceof
       multer.MulterError
     ) {
+
       if (
         error.code ===
         'LIMIT_FILE_SIZE'
       ) {
+
         return res
           .status(413)
           .json({
+
             error:
               'El archivo supera el límite máximo de 20 MB.',
           });
@@ -2803,6 +3326,7 @@ app.use(
       return res
         .status(400)
         .json({
+
           error:
             error.message,
         });
@@ -2823,9 +3347,11 @@ app.use(
     _req: Request,
     res: Response
   ) => {
+
     return res
       .status(404)
       .json({
+
         error:
           'Endpoint no encontrado.',
       });
@@ -2843,6 +3369,7 @@ app.use(
     res: Response,
     _next: NextFunction
   ) => {
+
     console.error(
       'Unhandled server error:',
       error
@@ -2856,6 +3383,7 @@ app.use(
     return res
       .status(500)
       .json({
+
         error:
           'Error interno del servidor.',
 
@@ -2874,6 +3402,7 @@ const server =
     PORT,
     '0.0.0.0',
     () => {
+
       console.log(
         '========================================'
       );
@@ -2921,6 +3450,10 @@ const server =
       );
 
       console.log(
+        'POST /generate-text'
+      );
+
+      console.log(
         'POST /upload'
       );
 
@@ -2945,12 +3478,14 @@ const server =
 function shutdown(
   signal: string
 ) {
+
   console.log(
     `${signal}: cerrando servidor...`
   );
 
   server.close(
     () => {
+
       console.log(
         'Servidor cerrado correctamente.'
       );
@@ -2963,6 +3498,7 @@ function shutdown(
 
   setTimeout(
     () => {
+
       console.error(
         'Forzando cierre del servidor.'
       );
@@ -2970,6 +3506,7 @@ function shutdown(
       process.exit(
         1
       );
+
     },
     10_000
   ).unref();
