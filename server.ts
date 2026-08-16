@@ -2,167 +2,109 @@ import express, {
   Request,
   Response,
   NextFunction,
-} from 'express';
+} from "express";
 
-import cors from 'cors';
-import multer from 'multer';
-import crypto from 'node:crypto';
+import cors from "cors";
+import crypto from "node:crypto";
 
 import {
-  GoogleGenAI,
-} from '@google/genai';
+  createCanvas,
+  loadImage,
+} from "@napi-rs/canvas";
 
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.js';
-import * as napiCanvas from '@napi-rs/canvas';
-
-/* =========================================================
-   TIPOS
-   ========================================================= */
-
-interface KeyState {
-  ai: GoogleGenAI;
-  blockedUntil: number;
-  keyNumber: number;
-}
-
-interface GithubConfig {
-  owner: string;
-  repo: string;
-  branch: string;
-  token: string;
-}
-
-interface DownloadedFile {
-  buffer: Buffer;
-  mimeType: string;
-}
-
-interface TarotCache {
-  files: string[];
-  timestamp: number;
-}
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
 
 /* =========================================================
-   POLYFILLS PARA PDF.JS
-   ========================================================= */
-
-const canvasAny =
-  napiCanvas as any;
-
-if (
-  !(globalThis as any).DOMMatrix &&
-  canvasAny.DOMMatrix
-) {
-  (globalThis as any).DOMMatrix =
-    canvasAny.DOMMatrix;
-}
-
-if (
-  !(globalThis as any).ImageData &&
-  canvasAny.ImageData
-) {
-  (globalThis as any).ImageData =
-    canvasAny.ImageData;
-}
-
-if (
-  !(globalThis as any).Path2D &&
-  canvasAny.Path2D
-) {
-  (globalThis as any).Path2D =
-    canvasAny.Path2D;
-}
-
-/* =========================================================
-   EXPRESS
+   TORCHILL API
    ========================================================= */
 
 const app = express();
 
-app.set(
-  'trust proxy',
-  1
-);
-
-/* =========================================================
-   CONFIG
-   ========================================================= */
-
-const PORT =
-  Number(
-    process.env.PORT
-  ) || 3000;
-
-const MODEL_NAME =
-  process.env.GEMINI_MODEL?.trim() ||
-  'gemini-3-flash-preview';
-
-const API_TOKEN =
-  process.env.API_TOKEN?.trim() ||
-  '';
-
-const MAX_UPLOAD_SIZE =
-  20 * 1024 * 1024;
-
-/* =========================================================
-   CORS
-   ========================================================= */
+app.set("trust proxy", 1);
 
 app.use(
   cors({
-    origin: true,
-
+    origin: "*",
     methods: [
-      'GET',
-      'POST',
-      'PUT',
-      'DELETE',
-      'OPTIONS',
+      "GET",
+      "POST",
+      "PUT",
+      "OPTIONS",
     ],
-
     allowedHeaders: [
-      'Content-Type',
-      'Authorization',
-      'X-API-Key',
+      "Content-Type",
+      "Authorization",
+      "X-API-Key",
     ],
-
-    credentials: false,
-
-    maxAge: 86400,
   })
 );
-
-/* =========================================================
-   BODY PARSERS
-   ========================================================= */
 
 app.use(
   express.json({
-    limit: '60mb',
-  })
-);
-
-app.use(
-  express.text({
-    type: 'text/plain',
-    limit: '25mb',
+    limit: "60mb",
   })
 );
 
 /* =========================================================
-   MULTER
+   ENVIRONMENT
    ========================================================= */
 
-const upload =
-  multer({
-    storage:
-      multer.memoryStorage(),
+const PORT =
+  Number(process.env.PORT) ||
+  3000;
 
-    limits: {
-      fileSize:
-        MAX_UPLOAD_SIZE,
-    },
-  });
+const API_TOKEN =
+  process.env.API_TOKEN ||
+  "";
+
+const GEMINI_API_KEY =
+  process.env.GEMINI_API_KEY ||
+  "";
+
+const GEMINI_MODEL =
+  process.env.GEMINI_MODEL ||
+  "gemini-2.0-flash";
+
+/* =========================================================
+   AUTH
+   ========================================================= */
+
+function auth(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  if (!API_TOKEN) {
+    return next();
+  }
+
+  const apiKeyHeader =
+    req.headers["x-api-key"];
+
+  const authorization =
+    req.headers.authorization ||
+    "";
+
+  const sent =
+    typeof apiKeyHeader ===
+    "string"
+      ? apiKeyHeader
+      : authorization.replace(
+          /^Bearer\s+/i,
+          ""
+        );
+
+  if (sent !== API_TOKEN) {
+    return res
+      .status(401)
+      .json({
+        error:
+          "no autorizado",
+      });
+  }
+
+  return next();
+}
 
 /* =========================================================
    HELPERS
@@ -176,429 +118,48 @@ function getParamString(
 ): string {
   if (
     typeof value ===
-    'string'
+    "string"
   ) {
     return value;
   }
 
   if (
-    Array.isArray(
-      value
-    )
+    Array.isArray(value)
   ) {
-    return value[0] || '';
+    return value[0] || "";
   }
 
-  return '';
-}
-
-function getRequestBody(
-  req: Request
-): Record<string, any> {
-  let body: unknown =
-    req.body;
-
-  if (
-    typeof body ===
-    'string'
-  ) {
-    try {
-      body =
-        JSON.parse(
-          body
-        );
-    } catch {
-      return {};
-    }
-  }
-
-  if (
-    !body ||
-    typeof body !==
-      'object' ||
-    Array.isArray(
-      body
-    )
-  ) {
-    return {};
-  }
-
-  return body as Record<
-    string,
-    any
-  >;
+  return "";
 }
 
 /* =========================================================
-   AUTH
+   GITHUB CONFIG
    ========================================================= */
 
-function auth(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
-  if (
-    !API_TOKEN
-  ) {
-    return next();
-  }
-
-  const headerKey =
-    req.headers[
-      'x-api-key'
-    ];
-
-  const authorization =
-    req.headers
-      .authorization ||
-    '';
-
-  const sent =
-    typeof headerKey ===
-    'string'
-      ? headerKey
-      : authorization.replace(
-          /^Bearer\s+/i,
-          ''
-        );
-
-  if (
-    sent !==
-    API_TOKEN
-  ) {
-    return res
-      .status(401)
-      .json({
-        ok: false,
-        error:
-          'no autorizado',
-      });
-  }
-
-  return next();
+interface GithubConfig {
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
 }
-
-/* =========================================================
-   GEMINI KEYS
-   ========================================================= */
-
-const rawApiKeys = [
-  process.env.GEMINI_API_KEY,
-  process.env.GEMINI_API_KEY_1,
-  process.env.GEMINI_API_KEY_2,
-  process.env.GEMINI_API_KEY_3,
-  process.env.GEMINI_API_KEY_4,
-  process.env.GEMINI_API_KEY_5,
-  process.env.GEMINI_API_KEY_6,
-  process.env.GEMINI_API_KEY_7,
-  process.env.GEMINI_API_KEY_8,
-  process.env.GEMINI_API_KEY_9,
-  process.env.GEMINI_API_KEY_10,
-];
-
-const apiKeys =
-  [
-    ...new Set(
-      rawApiKeys
-        .map(
-          (key) =>
-            typeof key ===
-            'string'
-              ? key.trim()
-              : ''
-        )
-        .filter(
-          (
-            key
-          ): key is string =>
-            key.length > 0
-        )
-    ),
-  ];
-
-const keyStates:
-  KeyState[] =
-  apiKeys.map(
-    (
-      key,
-      index
-    ) => ({
-      ai:
-        new GoogleGenAI({
-          apiKey:
-            key,
-        }),
-
-      blockedUntil:
-        0,
-
-      keyNumber:
-        index + 1,
-    })
-  );
-
-let currentKeyIndex =
-  0;
-
-if (
-  keyStates.length ===
-  0
-) {
-  console.warn(
-    'ADVERTENCIA: no hay API keys de Gemini configuradas.'
-  );
-} else {
-  console.log(
-    `Gemini: ${keyStates.length} API keys configuradas.`
-  );
-}
-
-/* =========================================================
-   GEMINI RATE LIMIT
-   ========================================================= */
-
-function isRateLimitError(
-  error: unknown
-): boolean {
-  const message =
-    error instanceof Error
-      ? error.message
-      : String(
-          error
-        );
-
-  const normalized =
-    message.toLowerCase();
-
-  return (
-    normalized.includes(
-      '429'
-    ) ||
-    normalized.includes(
-      'rate limit'
-    ) ||
-    normalized.includes(
-      'too_many_requests'
-    ) ||
-    normalized.includes(
-      'quota exceeded'
-    ) ||
-    normalized.includes(
-      'resource exhausted'
-    ) ||
-    normalized.includes(
-      'resource_exhausted'
-    )
-  );
-}
-
-function getRetryAfterMs(
-  error: unknown
-): number {
-  const message =
-    error instanceof Error
-      ? error.message
-      : String(
-          error
-        );
-
-  const patterns = [
-    /retry in\s+([\d.]+)s/i,
-    /retryDelay[^0-9]*([\d.]+)s/i,
-    /retry-after[^0-9]*([\d.]+)/i,
-  ];
-
-  for (
-    const pattern of
-    patterns
-  ) {
-    const match =
-      message.match(
-        pattern
-      );
-
-    if (
-      match
-    ) {
-      const seconds =
-        Number.parseFloat(
-          match[1]
-        );
-
-      if (
-        Number.isFinite(
-          seconds
-        ) &&
-        seconds > 0
-      ) {
-        return Math.ceil(
-          seconds *
-            1000
-        );
-      }
-    }
-  }
-
-  return 30_000;
-}
-
-function getAvailableKey():
-  KeyState | null {
-  if (
-    keyStates.length ===
-    0
-  ) {
-    return null;
-  }
-
-  const now =
-    Date.now();
-
-  for (
-    let i = 0;
-    i <
-    keyStates.length;
-    i++
-  ) {
-    const index =
-      (
-        currentKeyIndex +
-        i
-      ) %
-      keyStates.length;
-
-    const state =
-      keyStates[index];
-
-    if (
-      state.blockedUntil <=
-      now
-    ) {
-      currentKeyIndex =
-        (
-          index + 1
-        ) %
-        keyStates.length;
-
-      return state;
-    }
-  }
-
-  return null;
-}
-
-async function runGemini<T>(
-  operation: (
-    ai: GoogleGenAI
-  ) => Promise<T>
-): Promise<T> {
-  if (
-    keyStates.length ===
-    0
-  ) {
-    throw new Error(
-      'No hay ninguna API key de Gemini configurada.'
-    );
-  }
-
-  const attempted =
-    new Set<number>();
-
-  for (
-    let i = 0;
-    i <
-    keyStates.length;
-    i++
-  ) {
-    const keyState =
-      getAvailableKey();
-
-    if (
-      !keyState
-    ) {
-      break;
-    }
-
-    if (
-      attempted.has(
-        keyState.keyNumber
-      )
-    ) {
-      break;
-    }
-
-    attempted.add(
-      keyState.keyNumber
-    );
-
-    try {
-      console.log(
-        `Gemini: usando API key ${keyState.keyNumber}`
-      );
-
-      return await operation(
-        keyState.ai
-      );
-    } catch (
-      error: unknown
-    ) {
-      if (
-        !isRateLimitError(
-          error
-        )
-      ) {
-        throw error;
-      }
-
-      const retry =
-        getRetryAfterMs(
-          error
-        );
-
-      keyState.blockedUntil =
-        Date.now() +
-        retry;
-
-      console.warn(
-        `Gemini key ${keyState.keyNumber} limitada durante ${Math.ceil(
-          retry / 1000
-        )} segundos.`
-      );
-    }
-  }
-
-  throw new Error(
-    'Todas las API keys de Gemini están temporalmente limitadas.'
-  );
-}
-
-/* =========================================================
-   GITHUB
-   ========================================================= */
 
 function ghConfig():
   GithubConfig {
   const owner =
-    process.env
-      .GITHUB_OWNER
-      ?.trim();
+    process.env.GITHUB_OWNER ||
+    "";
 
   const repo =
-    process.env
-      .GITHUB_REPO
-      ?.trim();
+    process.env.GITHUB_REPO ||
+    "";
 
   const branch =
-    process.env
-      .GITHUB_BRANCH
-      ?.trim() ||
-    'main';
+    process.env.GITHUB_BRANCH ||
+    "main";
 
   const token =
-    process.env
-      .GITHUB_TOKEN
-      ?.trim();
+    process.env.GITHUB_TOKEN ||
+    "";
 
   if (
     !owner ||
@@ -606,7 +167,7 @@ function ghConfig():
     !token
   ) {
     throw new Error(
-      'Faltan GITHUB_OWNER, GITHUB_REPO o GITHUB_TOKEN.'
+      "GitHub no configurado. Faltan GITHUB_OWNER, GITHUB_REPO o GITHUB_TOKEN."
     );
   }
 
@@ -620,104 +181,20 @@ function ghConfig():
 
 function githubHeaders(
   token: string
-): Record<
-  string,
-  string
-> {
+) {
   return {
     Authorization:
       `Bearer ${token}`,
 
     Accept:
-      'application/vnd.github+json',
+      "application/vnd.github+json",
 
-    'X-GitHub-Api-Version':
-      '2022-11-28',
+    "X-GitHub-Api-Version":
+      "2022-11-28",
 
-    'User-Agent':
-      'torchill-api',
-
-    'Content-Type':
-      'application/json',
+    "User-Agent":
+      "torchill-api",
   };
-}
-
-/* =========================================================
-   GITHUB PATH
-   ========================================================= */
-
-function validateGithubPath(
-  path: string
-): string {
-  const result =
-    path
-      .replace(
-        /^\/+/,
-        ''
-      )
-      .replace(
-        /\\/g,
-        '/'
-      )
-      .trim();
-
-  if (
-    !result ||
-    result.includes(
-      '..'
-    ) ||
-    result.includes(
-      '\0'
-    )
-  ) {
-    throw new Error(
-      'Ruta de GitHub inválida.'
-    );
-  }
-
-  return result;
-}
-
-function encodeGithubPath(
-  path: string
-): string {
-  return path
-    .split('/')
-    .map(
-      (segment) =>
-        encodeURIComponent(
-          segment
-        )
-    )
-    .join('/');
-}
-
-/* =========================================================
-   BASE64 URL PATH
-   ========================================================= */
-
-function encodePathB64(
-  path: string
-): string {
-  return Buffer.from(
-    path,
-    'utf8'
-  ).toString(
-    'base64url'
-  );
-}
-
-function decodePathB64(
-  path: string
-): string {
-  return validateGithubPath(
-    Buffer.from(
-      path,
-      'base64url'
-    ).toString(
-      'utf8'
-    )
-  );
 }
 
 /* =========================================================
@@ -728,468 +205,494 @@ function mimeForPath(
   path: string
 ): string {
   const lower =
-    path.toLowerCase();
+    (path || "")
+      .toLowerCase();
 
   if (
-    lower.endsWith(
-      '.pdf'
-    )
+    lower.endsWith(".pdf")
   ) {
-    return 'application/pdf';
+    return "application/pdf";
   }
 
   if (
-    lower.endsWith(
-      '.png'
-    )
+    lower.endsWith(".png")
   ) {
-    return 'image/png';
+    return "image/png";
   }
 
   if (
-    lower.endsWith(
-      '.webp'
-    )
+    lower.endsWith(".webp")
   ) {
-    return 'image/webp';
+    return "image/webp";
   }
 
   if (
-    lower.endsWith(
-      '.gif'
-    )
+    lower.endsWith(".jpg") ||
+    lower.endsWith(".jpeg")
   ) {
-    return 'image/gif';
+    return "image/jpeg";
   }
 
-  if (
-    lower.endsWith(
-      '.svg'
-    )
-  ) {
-    return 'image/svg+xml';
-  }
-
-  if (
-    lower.endsWith(
-      '.jpg'
-    ) ||
-    lower.endsWith(
-      '.jpeg'
-    )
-  ) {
-    return 'image/jpeg';
-  }
-
-  return 'application/octet-stream';
+  return "application/octet-stream";
 }
 
 /* =========================================================
-   SUBIR ARCHIVO A GITHUB
+   ENCODE GITHUB PATH
    ========================================================= */
 
-async function uploadToGithub(
-  path: string,
-  buffer: Buffer
-) {
-  if (
-    buffer.length >
-    MAX_UPLOAD_SIZE
-  ) {
-    throw new Error(
-      'El archivo supera los 20 MB.'
-    );
-  }
-
-  const {
-    owner,
-    repo,
-    branch,
-    token,
-  } =
-    ghConfig();
-
-  const safePath =
-    validateGithubPath(
-      path
-    );
-
-  const url =
-    `https://api.github.com/repos/${encodeURIComponent(
-      owner
-    )}/${encodeURIComponent(
-      repo
-    )}/contents/${encodeGithubPath(
-      safePath
-    )}`;
-
-  const existingResponse =
-    await fetch(
-      `${url}?ref=${encodeURIComponent(
-        branch
-      )}`,
-      {
-        headers:
-          githubHeaders(
-            token
-          ),
-      }
-    );
-
-  let existingSha:
-    string | undefined;
-
-  if (
-    existingResponse.ok
-  ) {
-    const existing =
-      await existingResponse.json();
-
-    if (
-      existing &&
-      typeof existing.sha ===
-        'string'
-    ) {
-      existingSha =
-        existing.sha;
-    }
-  }
-
-  const body:
-    Record<
-      string,
-      any
-    > = {
-    message:
-      `Torchill upload: ${safePath}`,
-
-    content:
-      buffer.toString(
-        'base64'
-      ),
-
-    branch,
-  };
-
-  if (
-    existingSha
-  ) {
-    body.sha =
-      existingSha;
-  }
-
-  const response =
-    await fetch(
-      url,
-      {
-        method:
-          'PUT',
-
-        headers:
-          githubHeaders(
-            token
-          ),
-
-        body:
-          JSON.stringify(
-            body
-          ),
-      }
-    );
-
-  if (
-    !response.ok
-  ) {
-    const text =
-      await response.text();
-
-    throw new Error(
-      `GitHub upload error ${response.status}: ${text}`
-    );
-  }
-
-  const result =
-    await response.json();
-
-  return {
-    path:
-      safePath,
-
-    sha:
-      result
-        ?.content
-        ?.sha ||
-      null,
-
-    pathB64:
-      encodePathB64(
-        safePath
-      ),
-  };
-}
-
-/* =========================================================
-   DESCARGAR ARCHIVO PRIVADO DE GITHUB
-   ========================================================= */
-
-async function downloadGithubFile(
+function encodeGithubPath(
   path: string
-): Promise<
-  DownloadedFile
-> {
-  const {
-    owner,
-    repo,
-    branch,
-    token,
-  } =
-    ghConfig();
-
-  const safePath =
-    validateGithubPath(
-      path
-    );
-
-  const url =
-    `https://api.github.com/repos/${encodeURIComponent(
-      owner
-    )}/${encodeURIComponent(
-      repo
-    )}/contents/${encodeGithubPath(
-      safePath
-    )}?ref=${encodeURIComponent(
-      branch
-    )}`;
-
-  const response =
-    await fetch(
-      url,
-      {
-        headers: {
-          ...githubHeaders(
-            token
-          ),
-
-          Accept:
-            'application/vnd.github.raw',
-        },
-      }
-    );
-
-  if (
-    !response.ok
-  ) {
-    throw new Error(
-      `No se pudo descargar ${safePath} (${response.status}).`
-    );
-  }
-
-  const buffer =
-    Buffer.from(
-      await response.arrayBuffer()
-    );
-
-  return {
-    buffer,
-
-    mimeType:
-      mimeForPath(
-        safePath
-      ),
-  };
+): string {
+  return path
+    .split("/")
+    .map((part) =>
+      encodeURIComponent(part)
+    )
+    .join("/");
 }
 
 /* =========================================================
-   PDF -> PNG
+   HEALTH
    ========================================================= */
 
-async function pdfFirstPageToPng(
-  buffer: Buffer
-): Promise<
-  Buffer | null
-> {
-  let pdf:
-    any = null;
+app.get(
+  "/health",
+  (
+    _req: Request,
+    res: Response
+  ) => {
+    return res.json({
+      ok: true,
 
-  try {
-    const loadingTask =
-      pdfjsLib.getDocument({
-        data:
-          new Uint8Array(
-            buffer
-          ),
+      service:
+        "torchill-api",
 
-        isEvalSupported:
-          false,
-
-        useSystemFonts:
-          false,
-      });
-
-    pdf =
-      await loadingTask.promise;
-
-    if (
-      pdf.numPages <
-      1
-    ) {
-      return null;
-    }
-
-    const page =
-      await pdf.getPage(
-        1
-      );
-
-    const baseViewport =
-      page.getViewport({
-        scale: 1,
-      });
-
-    const maxSide =
-      1600;
-
-    const scale =
-      Math.min(
-        2,
-
-        maxSide /
-          Math.max(
-            baseViewport.width,
-            baseViewport.height
-          )
-      );
-
-    const viewport =
-      page.getViewport({
-        scale,
-      });
-
-    const canvas =
-      canvasAny.createCanvas(
-        Math.ceil(
-          viewport.width
+      gemini:
+        Boolean(
+          GEMINI_API_KEY
         ),
-        Math.ceil(
-          viewport.height
-        )
-      );
 
-    const context =
-      canvas.getContext(
-        '2d'
-      );
+      github:
+        Boolean(
+          process.env
+            .GITHUB_OWNER &&
+          process.env
+            .GITHUB_REPO &&
+          process.env
+            .GITHUB_TOKEN
+        ),
 
-    const canvasFactory =
-      {
-        create(
-          width: number,
-          height: number
-        ) {
-          const canvas =
-            canvasAny.createCanvas(
-              width,
-              height
-            );
+      model:
+        GEMINI_MODEL,
 
-          return {
-            canvas,
-            context:
-              canvas.getContext(
-                '2d'
-              ),
-          };
-        },
-
-        reset(
-          canvasAndContext:
-            any,
-          width: number,
-          height: number
-        ) {
-          canvasAndContext
-            .canvas.width =
-            width;
-
-          canvasAndContext
-            .canvas.height =
-            height;
-        },
-
-        destroy(
-          canvasAndContext:
-            any
-        ) {
-          canvasAndContext
-            .canvas.width =
-            0;
-
-          canvasAndContext
-            .canvas.height =
-            0;
-
-          canvasAndContext
-            .canvas =
-            null;
-
-          canvasAndContext
-            .context =
-            null;
-        },
-      };
-
-    await page.render({
-      canvasContext:
-        context,
-
-      viewport,
-
-      canvasFactory,
-    }).promise;
-
-    return canvas.toBuffer(
-      'image/png'
-    );
-  } catch (
-    error
-  ) {
-    console.error(
-      'PDF -> PNG error:',
-      error
-    );
-
-    return null;
-  } finally {
-    try {
-      if (
-        pdf
-      ) {
-        await pdf.destroy();
-      }
-    } catch {}
+      timestamp:
+        new Date()
+          .toISOString(),
+    });
   }
+);
+
+/* =========================================================
+   ROOT
+   ========================================================= */
+
+app.get(
+  "/",
+  (
+    _req: Request,
+    res: Response
+  ) => {
+    return res.json({
+      ok: true,
+
+      service:
+        "Torchill API",
+
+      endpoints: [
+        "GET /health",
+
+        "POST /upload",
+
+        "GET /receipt/:pathB64",
+
+        "GET /tarot/:n",
+
+        "GET /tarot/:w/:n",
+
+        "GET /tarot-manifest",
+
+        "POST /analyze-receipt",
+
+        "POST /generate-text",
+      ],
+    });
+  }
+);
+
+/* =========================================================
+   UPLOAD RECEIPT A GITHUB
+   ========================================================= */
+
+app.post(
+  "/upload",
+  async (
+    req: Request,
+    res: Response
+  ) => {
+    try {
+      const {
+        base64,
+        ext,
+      } =
+        req.body || {};
+
+      if (!base64) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "base64 requerido",
+          });
+      }
+
+      const {
+        owner,
+        repo,
+        branch,
+        token,
+      } =
+        ghConfig();
+
+      const safeExt =
+        String(
+          ext || "jpg"
+        )
+          .replace(
+            /[^a-zA-Z0-9]/g,
+            ""
+          )
+          .slice(
+            0,
+            5
+          )
+          .toLowerCase() ||
+        "jpg";
+
+      const now =
+        new Date();
+
+      const ym =
+        `${now.getUTCFullYear()}${String(
+          now.getUTCMonth() +
+            1
+        ).padStart(
+          2,
+          "0"
+        )}`;
+
+      const id =
+        crypto.randomUUID();
+
+      const path =
+        `receipts/${ym}/${id}.${safeExt}`;
+
+      let cleanBase64 =
+        String(base64);
+
+      cleanBase64 =
+        cleanBase64.replace(
+          /^data:[^;]+;base64,/i,
+          ""
+        );
+
+      const url =
+        `https://api.github.com/repos/${encodeURIComponent(
+          owner
+        )}/${encodeURIComponent(
+          repo
+        )}/contents/${encodeGithubPath(
+          path
+        )}`;
+
+      const ghRes =
+        await fetch(
+          url,
+          {
+            method:
+              "PUT",
+
+            headers: {
+              ...githubHeaders(
+                token
+              ),
+
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify({
+                message:
+                  `receipt: ${id}.${safeExt}`,
+
+                content:
+                  cleanBase64,
+
+                branch,
+              }),
+          }
+        );
+
+      if (!ghRes.ok) {
+        const errText =
+          await ghRes.text();
+
+        return res
+          .status(502)
+          .json({
+            error:
+              "GitHub error: " +
+              errText,
+          });
+      }
+
+      const pathB64 =
+        Buffer.from(
+          path
+        ).toString(
+          "base64url"
+        );
+
+      const rel =
+        `/receipt/${pathB64}`;
+
+      const absoluteUrl =
+        `${req.protocol}://${req.get(
+          "host"
+        )}${rel}`;
+
+      return res.json({
+        ok: true,
+
+        path,
+
+        pathB64,
+
+        fileUrl:
+          absoluteUrl,
+
+        url:
+          rel,
+
+        receiptUrl:
+          rel,
+
+        absoluteUrl,
+      });
+    } catch (
+      error: unknown
+    ) {
+      return res
+        .status(500)
+        .json({
+          error:
+            error instanceof
+            Error
+              ? error.message
+              : "unknown error",
+        });
+    }
+  }
+);
+
+/* =========================================================
+   RECEIPT PRIVADO
+   ========================================================= */
+
+app.get(
+  "/receipt/:pathB64",
+  async (
+    req: Request,
+    res: Response
+  ) => {
+    try {
+      const {
+        owner,
+        repo,
+        branch,
+        token,
+      } =
+        ghConfig();
+
+      const encoded =
+        getParamString(
+          req.params
+            .pathB64
+        );
+
+      const path =
+        Buffer.from(
+          encoded,
+          "base64url"
+        ).toString(
+          "utf8"
+        );
+
+      if (
+        !path.startsWith(
+          "receipts/"
+        )
+      ) {
+        return res
+          .status(403)
+          .send(
+            "ruta no permitida"
+          );
+      }
+
+      const rawUrl =
+        `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encodeGithubPath(
+          path
+        )}`;
+
+      const response =
+        await fetch(
+          rawUrl,
+          {
+            headers: {
+              Authorization:
+                `Bearer ${token}`,
+
+              Accept:
+                "application/vnd.github.raw",
+            },
+          }
+        );
+
+      if (!response.ok) {
+        return res
+          .status(
+            response.status
+          )
+          .send(
+            "not found"
+          );
+      }
+
+      const buffer =
+        Buffer.from(
+          await response.arrayBuffer()
+        );
+
+      res.setHeader(
+        "Content-Type",
+        mimeForPath(path)
+      );
+
+      res.setHeader(
+        "Cache-Control",
+        "private, max-age=3600"
+      );
+
+      return res.send(
+        buffer
+      );
+    } catch (
+      error
+    ) {
+      console.error(
+        "Receipt error:",
+        error
+      );
+
+      return res
+        .status(500)
+        .send(
+          "error"
+        );
+    }
+  }
+);
+
+/* =========================================================
+   TAROT TYPES
+   ========================================================= */
+
+interface TarotGithubFile {
+  name: string;
+  sha: string;
+  size: number;
+}
+
+interface TarotDirectoryCache {
+  files:
+    TarotGithubFile[];
+
+  timestamp:
+    number;
+}
+
+interface TarotOriginal {
+  buffer:
+    Buffer;
+
+  timestamp:
+    number;
+
+  mimeType:
+    string;
+
+  width:
+    number;
+
+  height:
+    number;
 }
 
 /* =========================================================
-   TAROT DIRECTORY CACHE
+   TAROT CACHE
    ========================================================= */
 
-let tarotCache:
-  TarotCache | null =
+let tarotDirectoryCache:
+  TarotDirectoryCache | null =
   null;
 
-const TAROT_CACHE_MS =
-  10 * 60 * 1000;
+const TAROT_DIRECTORY_TTL =
+  10 *
+  60 *
+  1000;
 
-async function listTarotFiles():
-  Promise<string[]> {
+const tarotOriginalCache =
+  new Map<
+    number,
+    TarotOriginal
+  >();
+
+const TAROT_ORIGINAL_TTL =
+  5 *
+  60 *
+  1000;
+
+/* =========================================================
+   LIST TAROT DIRECTORY
+   ========================================================= */
+
+async function listTarotFiles(
+  forceRefresh =
+    false
+): Promise<
+  TarotGithubFile[]
+> {
   if (
-    tarotCache &&
+    !forceRefresh &&
+    tarotDirectoryCache &&
     Date.now() -
-      tarotCache.timestamp <
-      TAROT_CACHE_MS
+      tarotDirectoryCache
+        .timestamp <
+      TAROT_DIRECTORY_TTL
   ) {
-    return tarotCache.files;
+    return tarotDirectoryCache
+      .files;
   }
 
   const {
@@ -1220,9 +723,7 @@ async function listTarotFiles():
       }
     );
 
-  if (
-    !response.ok
-  ) {
+  if (!response.ok) {
     const text =
       await response.text();
 
@@ -1235,38 +736,48 @@ async function listTarotFiles():
     await response.json();
 
   if (
-    !Array.isArray(
-      data
-    )
+    !Array.isArray(data)
   ) {
     throw new Error(
-      '/tarot no es un directorio válido.'
+      "/tarot no es un directorio válido."
     );
   }
 
-  const files =
+  const files:
+    TarotGithubFile[] =
     data
       .filter(
-        (
-          item: any
-        ) =>
+        (item: any) =>
           item?.type ===
-            'file' &&
+            "file" &&
           typeof item.name ===
-            'string' &&
-          /\.(png|jpe?g|webp)$/i.test(
+            "string" &&
+          /\.(jpg|jpeg|png|webp)$/i.test(
             item.name
           )
       )
       .map(
-        (
-          item: any
-        ) =>
-          item.name as string
+        (item: any) => ({
+          name:
+            item.name,
+
+          sha:
+            String(
+              item.sha ||
+              ""
+            ),
+
+          size:
+            Number(
+              item.size ||
+              0
+            ),
+        })
       );
 
-  tarotCache = {
+  tarotDirectoryCache = {
     files,
+
     timestamp:
       Date.now(),
   };
@@ -1274,32 +785,27 @@ async function listTarotFiles():
   return files;
 }
 
-function findTarotFile(
-  files: string[],
-  number: number
-):
-  string | null {
-  /*
-   * Busca nombres como:
-   *
-   * tarot juli-3.png
-   * juli-03.jpg
-   * juli_3.webp
-   */
+/* =========================================================
+   FIND TAROT FILE
+   ========================================================= */
 
+function findTarotFile(
+  number: number,
+  files:
+    TarotGithubFile[]
+):
+  TarotGithubFile | null {
   const regex =
     new RegExp(
-      `juli[\\s_-]*0*${number}(?=\\D|$)`,
-      'i'
+      `juli[\\s_-]*0*${number}\\b`,
+      "i"
     );
 
   return (
     files.find(
-      (
-        filename
-      ) =>
+      (file) =>
         regex.test(
-          filename
+          file.name
         )
     ) ||
     null
@@ -1307,386 +813,125 @@ function findTarotFile(
 }
 
 /* =========================================================
-   HEALTH
+   DOWNLOAD ORIGINAL TAROT
    ========================================================= */
 
-app.get(
-  '/health',
-  (
-    _req: Request,
-    res: Response
-  ) => {
-    return res.json({
-      ok: true,
+async function fetchTarotOriginal(
+  juli: number,
+  filename: string
+): Promise<
+  TarotOriginal
+> {
+  const cached =
+    tarotOriginalCache.get(
+      juli
+    );
 
-      service:
-        'torchill-api',
-
-      model:
-        MODEL_NAME,
-
-      geminiKeys:
-        keyStates.length,
-
-      github:
-        Boolean(
-          process.env
-            .GITHUB_OWNER &&
-          process.env
-            .GITHUB_REPO &&
-          process.env
-            .GITHUB_TOKEN
-        ),
-
-      timestamp:
-        new Date()
-          .toISOString(),
-    });
+  if (
+    cached &&
+    Date.now() -
+      cached.timestamp <
+      TAROT_ORIGINAL_TTL
+  ) {
+    return cached;
   }
-);
 
-/* =========================================================
-   ROOT
-   ========================================================= */
+  const {
+    owner,
+    repo,
+    branch,
+    token,
+  } =
+    ghConfig();
 
-app.get(
-  '/',
-  (
-    _req: Request,
-    res: Response
-  ) => {
-    return res.json({
-      ok: true,
+  const rawUrl =
+    `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/tarot/${encodeURIComponent(
+      filename
+    )}`;
 
-      service:
-        'Torchill API',
+  const response =
+    await fetch(
+      rawUrl,
+      {
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
 
-      endpoints: [
-        'GET /health',
-        'POST /upload',
-        'GET /receipt/:pathB64',
-        'GET /tarot/:n',
-        'POST /generate-text',
-        'POST /analyze-receipt',
-        'GET /api/gemini/project-copy',
-        'POST /api/gemini/project-copy',
-      ],
-    });
+          Accept:
+            "application/vnd.github.raw",
+        },
+      }
+    );
+
+  if (!response.ok) {
+    throw new Error(
+      `No se pudo descargar ${filename}.`
+    );
   }
-);
 
-/* =========================================================
-   UPLOAD
-   ========================================================= */
+  const buffer =
+    Buffer.from(
+      await response.arrayBuffer()
+    );
 
-app.post(
-  '/upload',
-  upload.single(
-    'file'
-  ),
-  async (
-    req: Request,
-    res: Response
-  ) => {
-    try {
-      let buffer:
-        Buffer;
+  let width =
+    0;
 
-      let extension =
-        'jpg';
+  let height =
+    0;
 
-      /*
-       * Modo multipart/form-data
-       */
-      if (
-        req.file
-      ) {
-        buffer =
-          req.file.buffer;
-
-        const filename =
-          req.file
-            .originalname ||
-          '';
-
-        const match =
-          filename.match(
-            /\.([A-Za-z0-9]+)$/
-          );
-
-        if (
-          match
-        ) {
-          extension =
-            match[1]
-              .toLowerCase()
-              .slice(
-                0,
-                5
-              );
-        }
-      } else {
-        /*
-         * Modo JSON:
-         *
-         * {
-         *   "base64":"...",
-         *   "ext":"jpg"
-         * }
-         */
-
-        const body =
-          getRequestBody(
-            req
-          );
-
-        let base64 =
-          typeof body.base64 ===
-          'string'
-            ? body.base64
-            : '';
-
-        if (
-          !base64
-        ) {
-          return res
-            .status(400)
-            .json({
-              ok: false,
-
-              error:
-                'Falta el archivo o el campo base64.',
-            });
-        }
-
-        /*
-         * Soporta data URL.
-         */
-        base64 =
-          base64.replace(
-            /^data:[^;]+;base64,/i,
-            ''
-          );
-
-        buffer =
-          Buffer.from(
-            base64,
-            'base64'
-          );
-
-        extension =
-          typeof body.ext ===
-          'string'
-            ? body.ext
-                .replace(
-                  /[^a-zA-Z0-9]/g,
-                  ''
-                )
-                .toLowerCase()
-                .slice(
-                  0,
-                  5
-                ) ||
-              'jpg'
-            : 'jpg';
-      }
-
-      if (
-        buffer.length ===
-        0
-      ) {
-        return res
-          .status(400)
-          .json({
-            ok: false,
-
-            error:
-              'Archivo vacío.',
-          });
-      }
-
-      if (
-        buffer.length >
-        MAX_UPLOAD_SIZE
-      ) {
-        return res
-          .status(413)
-          .json({
-            ok: false,
-
-            error:
-              'El archivo supera los 20 MB.',
-          });
-      }
-
-      const now =
-        new Date();
-
-      const ym =
-        `${now.getUTCFullYear()}${String(
-          now.getUTCMonth() +
-            1
-        ).padStart(
-          2,
-          '0'
-        )}`;
-
-      const id =
-        crypto.randomUUID();
-
-      const path =
-        `receipts/${ym}/${id}.${extension}`;
-
-      const result =
-        await uploadToGithub(
-          path,
-          buffer
-        );
-
-      const receiptUrl =
-        `/receipt/${result.pathB64}`;
-
-      const absoluteUrl =
-        `${req.protocol}://${req.get(
-          'host'
-        )}${receiptUrl}`;
-
-      return res.json({
-        ok: true,
-
-        ...result,
-
-        url:
-          receiptUrl,
-
-        receiptUrl,
-
-        fileUrl:
-          absoluteUrl,
-
-        absoluteUrl,
-
-        mimeType:
-          mimeForPath(
-            path
-          ),
-
-        size:
-          buffer.length,
-      });
-    } catch (
-      error: unknown
-    ) {
-      console.error(
-        'Upload error:',
-        error
+  try {
+    const image =
+      await loadImage(
+        buffer
       );
 
-      return res
-        .status(500)
-        .json({
-          ok: false,
+    width =
+      image.width;
 
-          error:
-            error instanceof
-            Error
-              ? error.message
-              : String(
-                  error
-                ),
-        });
-    }
-  }
-);
-
-/* =========================================================
-   RECEIPT PRIVADO
-   ========================================================= */
-
-app.get(
-  '/receipt/:pathB64',
-  async (
-    req: Request,
-    res: Response
-  ) => {
-    try {
-      const encoded =
-        getParamString(
-          req.params
-            .pathB64
-        );
-
-      const path =
-        decodePathB64(
-          encoded
-        );
-
-      /*
-       * Seguridad:
-       * /receipt solo debe servir receipts/.
-       */
-
-      if (
-        !path.startsWith(
-          'receipts/'
-        )
-      ) {
-        return res
-          .status(403)
-          .send(
-            'ruta no permitida'
-          );
-      }
-
-      const file =
-        await downloadGithubFile(
-          path
-        );
-
-      res.setHeader(
-        'Content-Type',
-        file.mimeType
-      );
-
-      res.setHeader(
-        'Content-Length',
-        String(
-          file.buffer
-            .length
-        )
-      );
-
-      res.setHeader(
-        'Cache-Control',
-        'private, max-age=3600'
-      );
-
-      return res.send(
-        file.buffer
-      );
-    } catch (
+    height =
+      image.height;
+  } catch (
+    error
+  ) {
+    console.error(
+      "No se pudieron leer dimensiones:",
+      filename,
       error
-    ) {
-      console.error(
-        'Receipt error:',
-        error
-      );
-
-      return res
-        .status(404)
-        .send(
-          'not found'
-        );
-    }
+    );
   }
-);
+
+  const original:
+    TarotOriginal = {
+    buffer,
+
+    timestamp:
+      Date.now(),
+
+    mimeType:
+      mimeForPath(
+        filename
+      ),
+
+    width,
+
+    height,
+  };
+
+  tarotOriginalCache.set(
+    juli,
+    original
+  );
+
+  return original;
+}
 
 /* =========================================================
-   TAROT
+   TAROT ORIGINAL
    ========================================================= */
 
 app.get(
-  '/tarot/:n',
+  "/tarot/:n",
   async (
     req: Request,
     res: Response
@@ -1695,7 +940,7 @@ app.get(
       const raw =
         getParamString(
           req.params.n
-        ).trim();
+        );
 
       if (
         !/^\d+$/.test(
@@ -1704,12 +949,9 @@ app.get(
       ) {
         return res
           .status(400)
-          .json({
-            ok: false,
-
-            error:
-              'Número de carta inválido.',
-          });
+          .send(
+            "n inválido"
+          );
       }
 
       const number =
@@ -1718,91 +960,507 @@ app.get(
           10
         );
 
-      if (
-        number < 3 ||
-        number > 80
-      ) {
-        return res
-          .status(404)
-          .json({
-            ok: false,
-
-            error:
-              `La carta ${number} está fuera del rango 3–80.`,
-          });
-      }
-
       const files =
         await listTarotFiles();
 
-      const filename =
+      const match =
         findTarotFile(
-          files,
-          number
+          number,
+          files
         );
 
-      if (
-        !filename
-      ) {
+      if (!match) {
         return res
           .status(404)
-          .json({
-            ok: false,
-
-            error:
-              `No se encontró la carta ${number}.`,
-
-            expected:
-              `Archivo en /tarot cuyo nombre contenga juli-${number}`,
-          });
+          .send(
+            `carta no encontrada: ${number}`
+          );
       }
 
-      const path =
-        `tarot/${filename}`;
-
-      const file =
-        await downloadGithubFile(
-          path
+      const original =
+        await fetchTarotOriginal(
+          number,
+          match.name
         );
 
       res.setHeader(
-        'Content-Type',
-        file.mimeType
+        "Content-Type",
+        original.mimeType
       );
 
       res.setHeader(
-        'Content-Length',
+        "Cache-Control",
+        "public, max-age=86400"
+      );
+
+      res.setHeader(
+        "Access-Control-Allow-Origin",
+        "*"
+      );
+
+      res.setHeader(
+        "Content-Length",
         String(
-          file.buffer
+          original.buffer
             .length
         )
       );
 
-      res.setHeader(
-        'Access-Control-Allow-Origin',
-        '*'
-      );
-
-      res.setHeader(
-        'Cache-Control',
-        'public, max-age=86400'
-      );
-
-      res.setHeader(
-        'X-Tarot-Card',
-        String(
-          number
-        )
-      );
-
       return res.send(
-        file.buffer
+        original.buffer
       );
     } catch (
       error
     ) {
       console.error(
-        'Tarot error:',
+        "Tarot error:",
+        error
+      );
+
+      return res
+        .status(500)
+        .send(
+          "error"
+        );
+    }
+  }
+);
+
+/* =========================================================
+   TAROT RESPONSIVE
+
+   /tarot/:w/:n
+
+   Ejemplos:
+
+   /tarot/160/25
+   /tarot/320/25
+   /tarot/640/25
+
+   Sin upscale.
+   WebP cuando sea posible.
+   JPEG fallback.
+   ========================================================= */
+
+app.get(
+  "/tarot/:w/:n",
+  async (
+    req: Request,
+    res: Response
+  ) => {
+    try {
+      const requestedWidth =
+        Number.parseInt(
+          getParamString(
+            req.params.w
+          ),
+          10
+        );
+
+      const number =
+        Number.parseInt(
+          getParamString(
+            req.params.n
+          ),
+          10
+        );
+
+      if (
+        !Number.isFinite(
+          requestedWidth
+        ) ||
+        requestedWidth <=
+          0 ||
+        !Number.isFinite(
+          number
+        ) ||
+        number <= 0
+      ) {
+        return res
+          .status(400)
+          .send(
+            "params inválidos"
+          );
+      }
+
+      /*
+       * Protección.
+       */
+      const width =
+        Math.min(
+          requestedWidth,
+          4096
+        );
+
+      const files =
+        await listTarotFiles();
+
+      const match =
+        findTarotFile(
+          number,
+          files
+        );
+
+      if (!match) {
+        return res
+          .status(404)
+          .send(
+            `carta no encontrada: ${number}`
+          );
+      }
+
+      const original =
+        await fetchTarotOriginal(
+          number,
+          match.name
+        );
+
+      /*
+       * Cache 1 año.
+       */
+      res.setHeader(
+        "Cache-Control",
+        "public, max-age=31536000, immutable"
+      );
+
+      res.setHeader(
+        "Access-Control-Allow-Origin",
+        "*"
+      );
+
+      res.setHeader(
+        "Vary",
+        "Accept"
+      );
+
+      /*
+       * SIN UPSCALE.
+       */
+      if (
+        !original.width ||
+        width >=
+          original.width
+      ) {
+        res.setHeader(
+          "Content-Type",
+          original.mimeType
+        );
+
+        res.setHeader(
+          "Content-Length",
+          String(
+            original.buffer
+              .length
+          )
+        );
+
+        res.setHeader(
+          "X-Tarot-Original-Width",
+          String(
+            original.width
+          )
+        );
+
+        res.setHeader(
+          "X-Tarot-Output-Width",
+          String(
+            original.width
+          )
+        );
+
+        return res.send(
+          original.buffer
+        );
+      }
+
+      /*
+       * Resize.
+       */
+      const image =
+        await loadImage(
+          original.buffer
+        );
+
+      const outputWidth =
+        width;
+
+      const outputHeight =
+        Math.max(
+          1,
+          Math.round(
+            image.height *
+              (
+                outputWidth /
+                image.width
+              )
+          )
+        );
+
+      const canvas =
+        createCanvas(
+          outputWidth,
+          outputHeight
+        );
+
+      const context =
+        canvas.getContext(
+          "2d"
+        );
+
+      context.imageSmoothingEnabled =
+        true;
+
+      try {
+        (
+          context as any
+        ).imageSmoothingQuality =
+          "high";
+      } catch {}
+
+      context.drawImage(
+        image,
+        0,
+        0,
+        outputWidth,
+        outputHeight
+      );
+
+      const accept =
+        String(
+          req.headers.accept ||
+          ""
+        );
+
+      let outputBuffer:
+        Buffer;
+
+      let outputMime:
+        string;
+
+      /*
+       * WEBP preferido.
+       */
+      if (
+        accept.includes(
+          "image/webp"
+        )
+      ) {
+        outputBuffer =
+          await canvas.encode(
+            "webp",
+            92
+          );
+
+        outputMime =
+          "image/webp";
+      } else {
+        outputBuffer =
+          await canvas.encode(
+            "jpeg",
+            92
+          );
+
+        outputMime =
+          "image/jpeg";
+      }
+
+      res.setHeader(
+        "Content-Type",
+        outputMime
+      );
+
+      res.setHeader(
+        "Content-Length",
+        String(
+          outputBuffer.length
+        )
+      );
+
+      res.setHeader(
+        "X-Tarot-Original-Width",
+        String(
+          original.width
+        )
+      );
+
+      res.setHeader(
+        "X-Tarot-Output-Width",
+        String(
+          outputWidth
+        )
+      );
+
+      return res.send(
+        outputBuffer
+      );
+    } catch (
+      error
+    ) {
+      console.error(
+        "Tarot resize error:",
+        error
+      );
+
+      return res
+        .status(500)
+        .send(
+          "error"
+        );
+    }
+  }
+);
+
+/* =========================================================
+   TAROT MANIFEST
+   ========================================================= */
+
+app.get(
+  "/tarot-manifest",
+  async (
+    _req: Request,
+    res: Response
+  ) => {
+    try {
+      const {
+        owner,
+        repo,
+        branch,
+        token,
+      } =
+        ghConfig();
+
+      /*
+       * Forzar lectura fresca.
+       */
+      const files =
+        await listTarotFiles(
+          true
+        );
+
+      let commitSha:
+        string | null =
+        null;
+
+      try {
+        const response =
+          await fetch(
+            `https://api.github.com/repos/${encodeURIComponent(
+              owner
+            )}/${encodeURIComponent(
+              repo
+            )}/branches/${encodeURIComponent(
+              branch
+            )}`,
+            {
+              headers:
+                githubHeaders(
+                  token
+                ),
+            }
+          );
+
+        if (
+          response.ok
+        ) {
+          const data =
+            await response.json();
+
+          commitSha =
+            data
+              ?.commit
+              ?.sha ||
+            null;
+        }
+      } catch (
+        error
+      ) {
+        console.error(
+          "Commit SHA error:",
+          error
+        );
+      }
+
+      const cards =
+        files
+          .map(
+            (file) => {
+              const match =
+                file.name.match(
+                  /juli[\s_-]*0*(\d+)\b/i
+                );
+
+              if (
+                !match
+              ) {
+                return null;
+              }
+
+              return {
+                juli:
+                  Number.parseInt(
+                    match[1],
+                    10
+                  ),
+
+                sha:
+                  file.sha,
+
+                size:
+                  file.size,
+
+                name:
+                  file.name,
+              };
+            }
+          )
+          .filter(
+            (
+              card
+            ): card is {
+              juli: number;
+              sha: string;
+              size: number;
+              name: string;
+            } =>
+              card !==
+              null
+          )
+          .sort(
+            (
+              a,
+              b
+            ) =>
+              a.juli -
+              b.juli
+          );
+
+      res.setHeader(
+        "Cache-Control",
+        "no-store"
+      );
+
+      res.setHeader(
+        "Access-Control-Allow-Origin",
+        "*"
+      );
+
+      return res.json({
+        ok: true,
+
+        commitSha,
+
+        branch,
+
+        count:
+          cards.length,
+
+        cards,
+      });
+    } catch (
+      error
+    ) {
+      console.error(
+        "Manifest error:",
         error
       );
 
@@ -1815,269 +1473,186 @@ app.get(
             error instanceof
             Error
               ? error.message
-              : String(
-                  error
-                ),
+              : "error",
         });
     }
   }
 );
 
 /* =========================================================
-   GENERATE TEXT
+   PDF FIRST PAGE -> PNG
    ========================================================= */
 
-app.post(
-  '/generate-text',
-  auth,
-  async (
-    req: Request,
-    res: Response
-  ) => {
-    try {
-      const body =
-        getRequestBody(
-          req
+async function pdfFirstPageToPng(
+  buffer: Buffer
+): Promise<
+  Buffer | null
+> {
+  class NodeCanvasFactory {
+    create(
+      width: number,
+      height: number
+    ) {
+      const canvas =
+        createCanvas(
+          width,
+          height
         );
-
-      const prompt =
-        typeof body.prompt ===
-        'string'
-          ? body.prompt.trim()
-          : '';
-
-      const text =
-        typeof body.text ===
-        'string'
-          ? body.text.trim()
-          : '';
-
-      const systemPrompt =
-        typeof body.systemPrompt ===
-        'string'
-          ? body.systemPrompt.trim()
-          : '';
 
       const context =
-        typeof body.context ===
-        'string'
-          ? body.context.trim()
-          : '';
-
-      const language =
-        typeof body.language ===
-        'string'
-          ? body.language.trim()
-          : '';
-
-      const userInput =
-        prompt ||
-        text;
-
-      if (
-        !userInput
-      ) {
-        return res
-          .status(400)
-          .json({
-            ok: false,
-
-            error:
-              'Falta prompt o text.',
-          });
-      }
-
-      let finalPrompt =
-        '';
-
-      if (
-        systemPrompt
-      ) {
-        finalPrompt +=
-          `${systemPrompt}\n\n`;
-      }
-
-      if (
-        language
-      ) {
-        finalPrompt +=
-          `Idioma de respuesta: ${language}\n\n`;
-      }
-
-      if (
-        context
-      ) {
-        finalPrompt +=
-          `Contexto:\n${context}\n\n`;
-      }
-
-      finalPrompt +=
-        userInput;
-
-      let temperature =
-        Number(
-          body.temperature
+        canvas.getContext(
+          "2d"
         );
 
-      if (
-        !Number.isFinite(
-          temperature
-        )
-      ) {
-        temperature =
-          0.7;
-      }
+      return {
+        canvas,
+        context,
+      };
+    }
 
-      temperature =
-        Math.max(
-          0,
-          Math.min(
-            2,
-            temperature
-          )
-        );
-
-      let maxOutputTokens =
-        Number(
-          body.maxOutputTokens
-        );
-
-      if (
-        !Number.isFinite(
-          maxOutputTokens
-        )
-      ) {
-        maxOutputTokens =
-          4096;
-      }
-
-      maxOutputTokens =
-        Math.max(
-          1,
-          Math.min(
-            8192,
-            Math.floor(
-              maxOutputTokens
-            )
-          )
-        );
-
-      const response =
-        await runGemini(
-          (
-            ai
-          ) =>
-            ai.models
-              .generateContent({
-                model:
-                  MODEL_NAME,
-
-                contents: [
-                  {
-                    role:
-                      'user',
-
-                    parts: [
-                      {
-                        text:
-                          finalPrompt,
-                      },
-                    ],
-                  },
-                ],
-
-                config: {
-                  temperature,
-
-                  maxOutputTokens,
-                },
-              })
-        );
-
-      const generatedText =
-        response.text
-          ?.trim() ||
-        '';
-
-      if (
-        !generatedText
-      ) {
-        throw new Error(
-          'Gemini devolvió una respuesta vacía.'
-        );
-      }
-
-      return res.json({
-        ok: true,
-
-        text:
-          generatedText,
-
-        response:
-          generatedText,
-
-        model:
-          MODEL_NAME,
-      });
-    } catch (
-      error
+    reset(
+      item: any,
+      width: number,
+      height: number
     ) {
-      console.error(
-        'Generate text error:',
-        error
-      );
+      item.canvas.width =
+        width;
 
-      return res
-        .status(
-          isRateLimitError(
-            error
-          )
-            ? 429
-            : 500
-        )
-        .json({
-          ok: false,
+      item.canvas.height =
+        height;
+    }
 
-          error:
-            error instanceof
-            Error
-              ? error.message
-              : String(
-                  error
-                ),
-        });
+    destroy(
+      item: any
+    ) {
+      item.canvas.width =
+        0;
+
+      item.canvas.height =
+        0;
+
+      item.context =
+        null;
+
+      item.canvas =
+        null;
     }
   }
-);
+
+  let pdf:
+    any = null;
+
+  try {
+    const task =
+      pdfjsLib.getDocument({
+        data:
+          new Uint8Array(
+            buffer
+          ),
+
+        isEvalSupported:
+          false,
+
+        useSystemFonts:
+          false,
+      });
+
+    pdf =
+      await task.promise;
+
+    const page =
+      await pdf.getPage(
+        1
+      );
+
+    const base =
+      page.getViewport({
+        scale: 1,
+      });
+
+    const maxSide =
+      1600;
+
+    const scale =
+      Math.min(
+        2,
+
+        maxSide /
+          Math.max(
+            base.width,
+            base.height
+          )
+      );
+
+    const viewport =
+      page.getViewport({
+        scale,
+      });
+
+    const factory =
+      new NodeCanvasFactory();
+
+    const result =
+      factory.create(
+        viewport.width,
+        viewport.height
+      );
+
+    await page.render({
+      canvasContext:
+        result.context,
+
+      viewport,
+
+      canvasFactory:
+        factory as any,
+    }).promise;
+
+    const png =
+      await result.canvas.encode(
+        "png"
+      );
+
+    factory.destroy(
+      result
+    );
+
+    return png;
+  } catch (
+    error
+  ) {
+    console.error(
+      "PDF render error:",
+      error
+    );
+
+    return null;
+  } finally {
+    try {
+      if (pdf) {
+        await pdf.destroy();
+      }
+    } catch {}
+  }
+}
 
 /* =========================================================
    ANALYZE RECEIPT
    ========================================================= */
 
 app.post(
-  '/analyze-receipt',
+  "/analyze-receipt",
   auth,
   async (
     req: Request,
     res: Response
   ) => {
     try {
-      const body =
-        getRequestBody(
-          req
-        );
-
-      const fileUrl =
-        typeof body.fileUrl ===
-        'string'
-          ? body.fileUrl.trim()
-          : '';
-
-      const prompt =
-        typeof body.prompt ===
-        'string'
-          ? body.prompt.trim()
-          : '';
+      const {
+        fileUrl,
+        prompt,
+      } =
+        req.body || {};
 
       if (
         !fileUrl ||
@@ -2086,179 +1661,127 @@ app.post(
         return res
           .status(400)
           .json({
-            ok: false,
-
             error:
-              'fileUrl y prompt son requeridos.',
+              "fileUrl y prompt son requeridos",
           });
       }
 
-      let buffer:
-        Buffer;
-
-      let mimeType:
-        string;
-
-      /*
-       * Si es una URL generada por este servidor,
-       * descargamos directamente desde GitHub.
-       */
-      try {
-        const parsed =
-          new URL(
-            fileUrl,
-            `${req.protocol}://${req.get(
-              'host'
-            )}`
-          );
-
-        const receiptMatch =
-          parsed.pathname.match(
-            /^\/receipt\/([^/]+)$/
-          );
-
-        if (
-          receiptMatch
-        ) {
-          const githubPath =
-            decodePathB64(
-              receiptMatch[1]
-            );
-
-          const file =
-            await downloadGithubFile(
-              githubPath
-            );
-
-          buffer =
-            file.buffer;
-
-          mimeType =
-            file.mimeType;
-        } else {
-          const response =
-            await fetch(
-              fileUrl
-            );
-
-          if (
-            !response.ok
-          ) {
-            throw new Error(
-              `No se pudo descargar el archivo (${response.status}).`
-            );
-          }
-
-          buffer =
-            Buffer.from(
-              await response.arrayBuffer()
-            );
-
-          mimeType =
-            (
-              response.headers.get(
-                'content-type'
-              ) ||
-              mimeForPath(
-                parsed.pathname
-              )
-            )
-              .split(';')[0]
-              .trim();
-        }
-      } catch (
-        error
-      ) {
-        throw new Error(
-          `No se pudo descargar el comprobante: ${
-            error instanceof
-            Error
-              ? error.message
-              : String(
-                  error
-                )
-          }`
-        );
-      }
-
       if (
-        buffer.length >
-        MAX_UPLOAD_SIZE
+        !GEMINI_API_KEY
       ) {
         return res
-          .status(413)
+          .status(500)
           .json({
-            ok: false,
-
             error:
-              'El comprobante supera los 20 MB.',
+              "GEMINI_API_KEY no configurada",
           });
       }
 
+      const fileRes =
+        await fetch(
+          fileUrl
+        );
+
+      if (!fileRes.ok) {
+        return res
+          .status(400)
+          .json({
+            error:
+              `No se pudo descargar el archivo (${fileRes.status})`,
+          });
+      }
+
+      const buffer =
+        Buffer.from(
+          await fileRes.arrayBuffer()
+        );
+
+      const detectedMime =
+        (
+          fileRes.headers.get(
+            "content-type"
+          ) ||
+          ""
+        )
+          .split(";")[0]
+          .trim()
+          .toLowerCase();
+
       const isPdf =
-        mimeType ===
-          'application/pdf' ||
-        fileUrl
+        detectedMime ===
+          "application/pdf" ||
+        String(
+          fileUrl
+        )
           .toLowerCase()
-          .includes(
-            '.pdf'
+          .endsWith(
+            ".pdf"
           );
 
-      if (
-        isPdf
-      ) {
+      let mimeType =
+        detectedMime &&
+        !detectedMime.includes(
+          "octet-stream"
+        )
+          ? detectedMime
+          : isPdf
+            ? "application/pdf"
+            : "image/jpeg";
+
+      let dataBuffer =
+        buffer;
+
+      if (isPdf) {
         const png =
           await pdfFirstPageToPng(
             buffer
           );
 
-        if (
-          png
-        ) {
-          buffer =
-            png;
-
+        if (png) {
           mimeType =
-            'image/png';
+            "image/png";
+
+          dataBuffer =
+            png;
         }
       }
 
       const base64 =
-        buffer.toString(
-          'base64'
+        dataBuffer.toString(
+          "base64"
         );
 
-      const finalPrompt =
-        `${prompt}
+      const geminiRes =
+        await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+            GEMINI_MODEL
+          )}:generateContent?key=${encodeURIComponent(
+            GEMINI_API_KEY
+          )}`,
+          {
+            method:
+              "POST",
 
-Devolvé ÚNICAMENTE JSON válido.
-No uses markdown.
-No agregues explicaciones fuera del JSON.`;
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
 
-      const response =
-        await runGemini(
-          (
-            ai
-          ) =>
-            ai.models
-              .generateContent({
-                model:
-                  MODEL_NAME,
-
+            body:
+              JSON.stringify({
                 contents: [
                   {
-                    role:
-                      'user',
-
                     parts: [
                       {
                         text:
-                          finalPrompt,
+                          prompt +
+                          "\n\nDevolvé ÚNICAMENTE un JSON válido, sin markdown ni texto adicional.",
                       },
 
                       {
-                        inlineData: {
-                          mimeType,
+                        inline_data: {
+                          mime_type:
+                            mimeType,
 
                           data:
                             base64,
@@ -2268,40 +1791,59 @@ No agregues explicaciones fuera del JSON.`;
                   },
                 ],
 
-                config: {
+                generation_config: {
+                  response_mime_type:
+                    "application/json",
+
                   temperature:
                     0.1,
-
-                  responseMimeType:
-                    'application/json',
                 },
-              })
+              }),
+          }
         );
 
-      const raw =
-        response.text
-          ?.trim() ||
-        '';
+      if (!geminiRes.ok) {
+        const text =
+          await geminiRes.text();
 
-      let detected:
-        any = null;
+        return res
+          .status(502)
+          .json({
+            error:
+              "Gemini error: " +
+              text,
+          });
+      }
+
+      const geminiJson =
+        await geminiRes.json();
+
+      const text =
+        geminiJson
+          ?.candidates?.[0]
+          ?.content
+          ?.parts?.[0]
+          ?.text ||
+        "";
+
+      let parsed:
+        any =
+        null;
 
       try {
-        detected =
+        parsed =
           JSON.parse(
-            raw
+            text
           );
       } catch {
         const match =
-          raw.match(
+          text.match(
             /\{[\s\S]*\}/
           );
 
-        if (
-          match
-        ) {
+        if (match) {
           try {
-            detected =
+            parsed =
               JSON.parse(
                 match[0]
               );
@@ -2312,393 +1854,171 @@ No agregues explicaciones fuera del JSON.`;
       return res.json({
         ok: true,
 
-        detected,
+        detected:
+          parsed,
 
-        raw,
-
-        mimeType,
-
-        model:
-          MODEL_NAME,
+        raw:
+          text,
       });
     } catch (
-      error
+      error: unknown
     ) {
-      console.error(
-        'Analyze receipt error:',
-        error
-      );
-
       return res
-        .status(
-          isRateLimitError(
-            error
-          )
-            ? 429
-            : 500
-        )
+        .status(500)
         .json({
-          ok: false,
-
           error:
             error instanceof
             Error
               ? error.message
-              : String(
-                  error
-                ),
+              : "unknown error",
         });
     }
   }
 );
 
 /* =========================================================
-   PROJECT COPY INFO
-   ========================================================= */
-
-app.get(
-  '/api/gemini/project-copy',
-  (
-    _req: Request,
-    res: Response
-  ) => {
-    return res.json({
-      ok: true,
-
-      endpoint:
-        '/api/gemini/project-copy',
-
-      model:
-        MODEL_NAME,
-
-      actions: [
-        'generate',
-        'translate',
-      ],
-    });
-  }
-);
-
-/* =========================================================
-   PROJECT COPY
+   GENERATE TEXT
    ========================================================= */
 
 app.post(
-  '/api/gemini/project-copy',
+  "/generate-text",
   auth,
   async (
     req: Request,
     res: Response
   ) => {
     try {
-      const body =
-        getRequestBody(
-          req
-        );
+      const {
+        prompt,
+      } =
+        req.body || {};
 
-      const action =
-        typeof body.action ===
-        'string'
-          ? body.action
-          : 'generate';
-
-      /*
-       * TRADUCCIÓN POR SEGMENTOS
-       */
-      if (
-        action ===
-        'translate'
-      ) {
-        const segments =
-          body.segments;
-
-        if (
-          !Array.isArray(
-            segments
-          ) ||
-          segments.length ===
-            0
-        ) {
-          return res
-            .status(400)
-            .json({
-              ok: false,
-
-              error:
-                'segments debe ser un array no vacío.',
-            });
-        }
-
-        const language =
-          body.language ===
-          'en'
-            ? 'inglés'
-            : body.language ===
-                'es'
-              ? 'español'
-              : String(
-                  body.language ||
-                  'español'
-                );
-
-        const prompt =
-          `Actúa como traductor profesional especializado en diseño gráfico y comunicación visual.
-
-Traduce los siguientes textos al ${language}.
-
-Reglas:
-- Mantén el significado.
-- No inventes información.
-- No elimines información.
-- Conserva exactamente el orden.
-- Mantén un tono profesional.
-- No agregues explicaciones.
-
-Textos:
-
-${JSON.stringify(
-  segments
-)}
-
-Devuelve ÚNICAMENTE JSON válido con esta estructura:
-
-{
-  "translations": [
-    "texto traducido 1",
-    "texto traducido 2"
-  ]
-}`;
-
-        const response =
-          await runGemini(
-            (
-              ai
-            ) =>
-              ai.models
-                .generateContent({
-                  model:
-                    MODEL_NAME,
-
-                  contents: [
-                    {
-                      role:
-                        'user',
-
-                      parts: [
-                        {
-                          text:
-                            prompt,
-                        },
-                      ],
-                    },
-                  ],
-
-                  config: {
-                    temperature:
-                      0.1,
-
-                    responseMimeType:
-                      'application/json',
-                  },
-                })
-          );
-
-        const raw =
-          response.text
-            ?.trim() ||
-          '';
-
-        let parsed:
-          any;
-
-        try {
-          parsed =
-            JSON.parse(
-              raw
-            );
-        } catch {
-          throw new Error(
-            'Gemini devolvió JSON inválido.'
-          );
-        }
-
-        return res.json({
-          ok: true,
-
-          ...parsed,
-        });
-      }
-
-      /*
-       * GENERACIÓN NORMAL
-       */
-
-      const text =
-        typeof body.text ===
-        'string'
-          ? body.text
-          : '';
-
-      const title =
-        typeof body.title ===
-        'string'
-          ? body.title
-          : '';
-
-      const prompt =
-        typeof body.prompt ===
-        'string'
-          ? body.prompt
-          : '';
-
-      const userInput =
-        prompt ||
-        text;
-
-      if (
-        !userInput
-      ) {
+      if (!prompt) {
         return res
           .status(400)
           .json({
-            ok: false,
-
             error:
-              'Falta prompt o text.',
+              "prompt requerido",
           });
       }
 
-      const finalPrompt =
-        title
-          ? `Título del proyecto: ${title}
+      if (
+        !GEMINI_API_KEY
+      ) {
+        return res
+          .status(500)
+          .json({
+            error:
+              "GEMINI_API_KEY no configurada",
+          });
+      }
 
-${userInput}`
-          : userInput;
+      const geminiRes =
+        await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+            GEMINI_MODEL
+          )}:generateContent?key=${encodeURIComponent(
+            GEMINI_API_KEY
+          )}`,
+          {
+            method:
+              "POST",
 
-      const response =
-        await runGemini(
-          (
-            ai
-          ) =>
-            ai.models
-              .generateContent({
-                model:
-                  MODEL_NAME,
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
 
+            body:
+              JSON.stringify({
                 contents: [
                   {
-                    role:
-                      'user',
-
                     parts: [
                       {
                         text:
-                          finalPrompt,
+                          prompt,
                       },
                     ],
                   },
                 ],
 
-                config: {
+                generation_config: {
                   temperature:
-                    0.7,
+                    0.85,
 
-                  maxOutputTokens:
-                    4096,
+                  max_output_tokens:
+                    2400,
+
+                  top_p:
+                    0.95,
                 },
-              })
+              }),
+          }
         );
 
-      const generated =
-        response.text
-          ?.trim() ||
-        '';
+      if (!geminiRes.ok) {
+        const text =
+          await geminiRes.text();
+
+        return res
+          .status(502)
+          .json({
+            error:
+              "Gemini error: " +
+              text,
+          });
+      }
+
+      const geminiJson =
+        await geminiRes.json();
+
+      const candidate =
+        geminiJson
+          ?.candidates?.[0];
+
+      const text =
+        candidate
+          ?.content
+          ?.parts?.[0]
+          ?.text ||
+        "";
+
+      if (
+        !text &&
+        candidate
+          ?.finishReason &&
+        candidate
+          .finishReason !==
+          "STOP"
+      ) {
+        return res
+          .status(502)
+          .json({
+            error:
+              "Gemini finishReason: " +
+              candidate
+                .finishReason,
+          });
+      }
 
       return res.json({
         ok: true,
 
-        text:
-          generated,
-
-        response:
-          generated,
-
-        model:
-          MODEL_NAME,
+        text,
       });
     } catch (
-      error
+      error: unknown
     ) {
-      console.error(
-        'Project copy error:',
-        error
-      );
-
       return res
-        .status(
-          isRateLimitError(
-            error
-          )
-            ? 429
-            : 500
-        )
+        .status(500)
         .json({
-          ok: false,
-
           error:
             error instanceof
             Error
               ? error.message
-              : String(
-                  error
-                ),
+              : "unknown error",
         });
     }
-  }
-);
-
-/* =========================================================
-   MULTER ERRORS
-   ========================================================= */
-
-app.use(
-  (
-    error: any,
-    _req: Request,
-    res: Response,
-    next: NextFunction
-  ) => {
-    if (
-      error instanceof
-      multer.MulterError
-    ) {
-      if (
-        error.code ===
-        'LIMIT_FILE_SIZE'
-      ) {
-        return res
-          .status(413)
-          .json({
-            ok: false,
-
-            error:
-              'El archivo supera los 20 MB.',
-          });
-      }
-
-      return res
-        .status(400)
-        .json({
-          ok: false,
-
-          error:
-            error.message,
-        });
-    }
-
-    return next(
-      error
-    );
   }
 );
 
@@ -2717,181 +2037,79 @@ app.use(
         ok: false,
 
         error:
-          'Endpoint no encontrado.',
+          "Endpoint no encontrado",
       });
   }
 );
 
 /* =========================================================
-   ERROR GENERAL
+   SERVER
    ========================================================= */
 
-app.use(
-  (
-    error: unknown,
-    _req: Request,
-    res: Response,
-    _next: NextFunction
-  ) => {
-    console.error(
-      'Unhandled server error:',
-      error
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      "======================================"
     );
 
-    return res
-      .status(500)
-      .json({
-        ok: false,
+    console.log(
+      "Torchill API iniciada"
+    );
 
-        error:
-          'Error interno del servidor.',
+    console.log(
+      `Puerto: ${PORT}`
+    );
 
-        details:
-          error instanceof
-          Error
-            ? error.message
-            : String(
-                error
-              ),
-      });
+    console.log(
+      `Gemini: ${Boolean(
+        GEMINI_API_KEY
+      )}`
+    );
+
+    console.log(
+      `Modelo: ${GEMINI_MODEL}`
+    );
+
+    console.log(
+      "--------------------------------------"
+    );
+
+    console.log(
+      "GET  /health"
+    );
+
+    console.log(
+      "POST /upload"
+    );
+
+    console.log(
+      "GET  /receipt/:pathB64"
+    );
+
+    console.log(
+      "GET  /tarot/:n"
+    );
+
+    console.log(
+      "GET  /tarot/:w/:n"
+    );
+
+    console.log(
+      "GET  /tarot-manifest"
+    );
+
+    console.log(
+      "POST /analyze-receipt"
+    );
+
+    console.log(
+      "POST /generate-text"
+    );
+
+    console.log(
+      "======================================"
+    );
   }
-);
-
-/* =========================================================
-   START
-   ========================================================= */
-
-const server =
-  app.listen(
-    PORT,
-    '0.0.0.0',
-    () => {
-      console.log(
-        '========================================'
-      );
-
-      console.log(
-        'Torchill API iniciada correctamente'
-      );
-
-      console.log(
-        `Puerto: ${PORT}`
-      );
-
-      console.log(
-        `Modelo Gemini: ${MODEL_NAME}`
-      );
-
-      console.log(
-        `Gemini API keys: ${keyStates.length}`
-      );
-
-      console.log(
-        `GitHub configurado: ${Boolean(
-          process.env
-            .GITHUB_OWNER &&
-          process.env
-            .GITHUB_REPO &&
-          process.env
-            .GITHUB_TOKEN
-        )}`
-      );
-
-      console.log(
-        '----------------------------------------'
-      );
-
-      console.log(
-        'GET  /'
-      );
-
-      console.log(
-        'GET  /health'
-      );
-
-      console.log(
-        'POST /upload'
-      );
-
-      console.log(
-        'GET  /receipt/:pathB64'
-      );
-
-      console.log(
-        'GET  /tarot/:n'
-      );
-
-      console.log(
-        'POST /generate-text'
-      );
-
-      console.log(
-        'POST /analyze-receipt'
-      );
-
-      console.log(
-        'GET  /api/gemini/project-copy'
-      );
-
-      console.log(
-        'POST /api/gemini/project-copy'
-      );
-
-      console.log(
-        '========================================'
-      );
-    }
-  );
-
-/* =========================================================
-   SHUTDOWN
-   ========================================================= */
-
-function shutdown(
-  signal: string
-) {
-  console.log(
-    `${signal}: cerrando servidor...`
-  );
-
-  server.close(
-    () => {
-      console.log(
-        'Servidor cerrado.'
-      );
-
-      process.exit(
-        0
-      );
-    }
-  );
-
-  setTimeout(
-    () => {
-      console.error(
-        'Forzando cierre del servidor.'
-      );
-
-      process.exit(
-        1
-      );
-    },
-    10_000
-  ).unref();
-}
-
-process.on(
-  'SIGTERM',
-  () =>
-    shutdown(
-      'SIGTERM'
-    )
-);
-
-process.on(
-  'SIGINT',
-  () =>
-    shutdown(
-      'SIGINT'
-    )
 );
