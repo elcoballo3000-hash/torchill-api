@@ -1246,19 +1246,23 @@ app.get(
         )
       ) {
         outputBuffer =
-          await canvas.encode(
-            "webp",
-            92
-          );
+  Buffer.from(
+    await canvas.encode(
+      "webp",
+      92
+    )
+  );
 
         outputMime =
           "image/webp";
       } else {
         outputBuffer =
-          await canvas.encode(
-            "jpeg",
-            92
-          );
+  Buffer.from(
+    await canvas.encode(
+      "jpeg",
+      92
+    )
+  );
 
         outputMime =
           "image/jpeg";
