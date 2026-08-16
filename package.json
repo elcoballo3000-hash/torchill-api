@@ -2,7 +2,7 @@
   "name": "torchill-api",
   "version": "1.0.0",
   "private": true,
-  "description": "API de Torchill y Star Tarot para Gemini, comprobantes, GitHub y cartas de tarot.",
+  "description": "Torchill API - Render, Gemini, GitHub receipts and Star Tarot image server",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
@@ -12,17 +12,14 @@
     "node": "20.x"
   },
   "dependencies": {
-    "@google/genai": "^2.3.0",
-    "@napi-rs/canvas": "^0.1.77",
+    "@napi-rs/canvas": "^0.1.80",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "multer": "^2.0.2",
-    "pdfjs-dist": "^3.11.174"
+    "pdfjs-dist": "3.11.174"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.3",
-    "@types/multer": "^2.0.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.2"
   }
