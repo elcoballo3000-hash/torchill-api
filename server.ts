@@ -697,9 +697,10 @@ app.get('/api/gemini/project-copy', (_req: Request, res: Response) => {
 
 app.post('/upload', auth, upload.single('file'), async (req: Request, res: Response) => {
   try {
-    let buffer: Buffer | null = req.file?.buffer || null;
-    let originalName = req.file?.originalname || '';
-    let mimeType = req.file?.mimetype || '';
+    const uploadedFile = (req as any).file as { buffer?: Buffer; originalname?: string; mimetype?: string } | undefined;
+    let buffer: Buffer | null = uploadedFile?.buffer || null;
+    let originalName = uploadedFile?.originalname || '';
+    let mimeType = uploadedFile?.mimetype || '';
     const body = getRequestBody(req);
 
     if (!buffer) {
@@ -1001,7 +1002,7 @@ Devuelve exclusivamente JSON válido con esta estructura:
 {"translations":["texto traducido 1","texto traducido 2"]}
 `;
 
-      const interaction = await runGemini((ai) =>
+      const interaction: any = await runGemini<any>((ai) =>
         ai.interactions.create({
           model: modelName,
           input: prompt,
@@ -1059,7 +1060,7 @@ Devuelve exclusivamente JSON válido con esta estructura:
 }
 `;
 
-    const interaction = await runGemini((ai) =>
+    const interaction: any = await runGemini<any>((ai) =>
       ai.interactions.create({
         model: modelName,
         input: prompt,
@@ -1125,7 +1126,7 @@ app.post('/generate-text', auth, async (req: Request, res: Response) => {
     const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
     if (!prompt) return res.status(400).json({ error: 'prompt requerido' });
 
-    const response = await runGemini((ai) =>
+    const response: any = await runGemini<any>((ai) =>
       ai.models.generateContent({
         model: modelName,
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -1231,7 +1232,7 @@ IMPORTANTE:
 - Devuelve ÚNICAMENTE JSON válido.
 `;
 
-    const response = await runGemini((ai) =>
+    const response: any = await runGemini<any>((ai) =>
       ai.models.generateContent({
         model: modelName,
         contents: [
