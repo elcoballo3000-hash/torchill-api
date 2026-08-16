@@ -54,13 +54,85 @@ const API_TOKEN =
   process.env.API_TOKEN ||
   "";
 
-const GEMINI_API_KEY =
-  process.env.GEMINI_API_KEY ||
-  "";
+/*
+ * =========================================================
+ * GEMINI
+ * =========================================================
+ *
+ * Acepta:
+ *
+ * GEMINI_API_KEY
+ *
+ * o:
+ *
+ * GEMINI_API_KEY_1
+ * GEMINI_API_KEY_2
+ * ...
+ * GEMINI_API_KEY_10
+ *
+ * Se eliminan keys duplicadas automáticamente.
+ */
+
+const GEMINI_API_KEYS = [
+  process.env.GEMINI_API_KEY,
+
+  process.env.GEMINI_API_KEY_1,
+  process.env.GEMINI_API_KEY_2,
+  process.env.GEMINI_API_KEY_3,
+  process.env.GEMINI_API_KEY_4,
+  process.env.GEMINI_API_KEY_5,
+  process.env.GEMINI_API_KEY_6,
+  process.env.GEMINI_API_KEY_7,
+  process.env.GEMINI_API_KEY_8,
+  process.env.GEMINI_API_KEY_9,
+  process.env.GEMINI_API_KEY_10,
+]
+  .map((key) =>
+    typeof key === "string"
+      ? key.trim()
+      : ""
+  )
+  .filter(Boolean)
+  .filter(
+    (key, index, array) =>
+      array.indexOf(key) ===
+      index
+  );
 
 const GEMINI_MODEL =
   process.env.GEMINI_MODEL ||
   "gemini-2.0-flash";
+
+let geminiKeyIndex = 0;
+
+/*
+ * Guarda temporalmente las claves
+ * que dieron error de cuota.
+ */
+
+const blockedGeminiKeys =
+  new Map();
+
+/* =========================================================
+   GEMINI INFO
+   ========================================================= */
+
+if (
+  GEMINI_API_KEYS.length ===
+  0
+) {
+  console.error(
+    "ERROR: Gemini no está configurado."
+  );
+
+  console.error(
+    "Configurá GEMINI_API_KEY o GEMINI_API_KEY_1...GEMINI_API_KEY_10 en Render."
+  );
+} else {
+  console.log(
+    `Gemini: ${GEMINI_API_KEYS.length} API key(s) detectada(s).`
+  );
+}
 
 /* =========================================================
    AUTH
@@ -170,6 +242,10 @@ function ghConfig() {
   };
 }
 
+/* =========================================================
+   GITHUB HEADERS
+   ========================================================= */
+
 function githubHeaders(
   token
 ) {
@@ -219,41 +295,300 @@ function mimeForPath(
     ).toLowerCase();
 
   if (
-    lower.endsWith(
-      ".pdf"
-    )
+    lower.endsWith(".pdf")
   ) {
     return "application/pdf";
   }
 
   if (
-    lower.endsWith(
-      ".png"
-    )
+    lower.endsWith(".png")
   ) {
     return "image/png";
   }
 
   if (
-    lower.endsWith(
-      ".webp"
-    )
+    lower.endsWith(".webp")
   ) {
     return "image/webp";
   }
 
   if (
-    lower.endsWith(
-      ".jpg"
-    ) ||
-    lower.endsWith(
-      ".jpeg"
-    )
+    lower.endsWith(".jpg") ||
+    lower.endsWith(".jpeg")
   ) {
     return "image/jpeg";
   }
 
   return "application/octet-stream";
+}
+
+/* =========================================================
+   GEMINI — DETECTAR RATE LIMIT
+   ========================================================= */
+
+function isGeminiRateLimit(
+  status,
+  text
+) {
+  const normalized =
+    String(
+      text || ""
+    ).toLowerCase();
+
+  return (
+    status === 429 ||
+
+    normalized.includes(
+      "quota"
+    ) ||
+
+    normalized.includes(
+      "rate limit"
+    ) ||
+
+    normalized.includes(
+      "resource_exhausted"
+    ) ||
+
+    normalized.includes(
+      "resource exhausted"
+    )
+  );
+}
+
+/* =========================================================
+   GEMINI — OBTENER KEY
+   ========================================================= */
+
+function getAvailableGeminiKeys() {
+  const now =
+    Date.now();
+
+  return GEMINI_API_KEYS.filter(
+    (key) => {
+      const blockedUntil =
+        blockedGeminiKeys.get(
+          key
+        ) || 0;
+
+      return (
+        blockedUntil <= now
+      );
+    }
+  );
+}
+
+/* =========================================================
+   GEMINI REQUEST
+   ========================================================= */
+
+async function callGemini(
+  body
+) {
+  if (
+    GEMINI_API_KEYS.length ===
+    0
+  ) {
+    throw new Error(
+      "Gemini no configurado. Agregá GEMINI_API_KEY o GEMINI_API_KEY_1...10 en Render."
+    );
+  }
+
+  let availableKeys =
+    getAvailableGeminiKeys();
+
+  /*
+   * Si todas están bloqueadas,
+   * volvemos a permitirlas.
+   */
+
+  if (
+    availableKeys.length ===
+    0
+  ) {
+    blockedGeminiKeys.clear();
+
+    availableKeys =
+      [...GEMINI_API_KEYS];
+  }
+
+  let lastError = "";
+
+  for (
+    let attempt = 0;
+    attempt <
+    availableKeys.length;
+    attempt++
+  ) {
+    const index =
+      (
+        geminiKeyIndex +
+        attempt
+      ) %
+      availableKeys.length;
+
+    const key =
+      availableKeys[index];
+
+    const geminiUrl =
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+        GEMINI_MODEL
+      )}:generateContent?key=${encodeURIComponent(
+        key
+      )}`;
+
+    try {
+      const response =
+        await fetch(
+          geminiUrl,
+          {
+            method:
+              "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify(
+                body
+              ),
+          }
+        );
+
+      if (
+        response.ok
+      ) {
+        geminiKeyIndex =
+          (
+            index + 1
+          ) %
+          availableKeys.length;
+
+        return await response.json();
+      }
+
+      const errorText =
+        await response.text();
+
+      lastError =
+        `Gemini ${response.status}: ${errorText}`;
+
+      /*
+       * Si la key llegó al límite,
+       * la bloqueamos 60 segundos
+       * y probamos con otra.
+       */
+
+      if (
+        isGeminiRateLimit(
+          response.status,
+          errorText
+        )
+      ) {
+        console.warn(
+          `Gemini: key temporalmente limitada. Probando otra key.`
+        );
+
+        blockedGeminiKeys.set(
+          key,
+          Date.now() +
+            60_000
+        );
+
+        continue;
+      }
+
+      /*
+       * Si es 401/403 probablemente
+       * la key es inválida.
+       *
+       * Probamos otra.
+       */
+
+      if (
+        response.status ===
+          401 ||
+        response.status ===
+          403
+      ) {
+        console.warn(
+          "Gemini: una API key fue rechazada. Probando la siguiente."
+        );
+
+        blockedGeminiKeys.set(
+          key,
+          Date.now() +
+            10 *
+              60 *
+              1000
+        );
+
+        continue;
+      }
+
+      throw new Error(
+        lastError
+      );
+    } catch (
+      error
+    ) {
+      lastError =
+        error?.message ||
+        String(error);
+
+      console.error(
+        "Gemini request error:",
+        lastError
+      );
+    }
+  }
+
+  throw new Error(
+    lastError ||
+      "No se pudo obtener respuesta de Gemini."
+  );
+}
+
+/* =========================================================
+   EXTRAER TEXTO GEMINI
+   ========================================================= */
+
+function extractGeminiText(
+  geminiJson
+) {
+  const candidate =
+    geminiJson &&
+    geminiJson.candidates &&
+    geminiJson.candidates[0];
+
+  if (
+    !candidate
+  ) {
+    return "";
+  }
+
+  const parts =
+    candidate.content &&
+    candidate.content.parts;
+
+  if (
+    !Array.isArray(parts)
+  ) {
+    return "";
+  }
+
+  return parts
+    .map(
+      (part) =>
+        typeof part?.text ===
+        "string"
+          ? part.text
+          : ""
+    )
+    .join("")
+    .trim();
 }
 
 /* =========================================================
@@ -273,9 +608,11 @@ app.get(
         "torchill-api",
 
       gemini:
-        Boolean(
-          GEMINI_API_KEY
-        ),
+        GEMINI_API_KEYS.length >
+        0,
+
+      geminiKeys:
+        GEMINI_API_KEYS.length,
 
       github:
         Boolean(
@@ -315,12 +652,19 @@ app.get(
 
       endpoints: [
         "GET /health",
+
         "POST /upload",
+
         "GET /receipt/:pathB64",
+
         "GET /tarot/:n",
+
         "GET /tarot/:w/:n",
+
         "GET /tarot-manifest",
+
         "POST /analyze-receipt",
+
         "POST /generate-text",
       ],
     });
@@ -539,6 +883,11 @@ app.get(
           "utf8"
         );
 
+      /*
+       * Seguridad:
+       * solo permite receipts/
+       */
+
       if (
         !path.startsWith(
           "receipts/"
@@ -716,9 +1065,7 @@ async function listTarotFiles(
   const files =
     data
       .filter(
-        (
-          item
-        ) =>
+        (item) =>
           item &&
           item.type ===
             "file" &&
@@ -729,9 +1076,7 @@ async function listTarotFiles(
           )
       )
       .map(
-        (
-          item
-        ) => ({
+        (item) => ({
           name:
             item.name,
 
@@ -771,6 +1116,16 @@ function findTarotFile(
   number,
   files
 ) {
+  /*
+   * Soporta:
+   *
+   * juli-3
+   * juli_3
+   * juli 3
+   * juli-03
+   * tarot juli-3
+   */
+
   const regex =
     new RegExp(
       `juli[\\s_-]*0*${number}\\b`,
@@ -779,9 +1134,7 @@ function findTarotFile(
 
   return (
     files.find(
-      (
-        file
-      ) =>
+      (file) =>
         regex.test(
           file.name
         )
@@ -801,6 +1154,10 @@ const TAROT_ORIGINAL_TTL =
   5 *
   60 *
   1000;
+
+/* =========================================================
+   FETCH TAROT ORIGINAL
+   ========================================================= */
 
 async function fetchTarotOriginal(
   number,
@@ -1030,10 +1387,12 @@ app.get(
 
    /tarot/:w/:n
 
-   EJ:
+   Ejemplos:
+
    /tarot/200/25
    /tarot/400/25
    /tarot/800/25
+
    ========================================================= */
 
 app.get(
@@ -1078,6 +1437,10 @@ app.get(
           );
       }
 
+      /*
+       * Protección contra imágenes enormes.
+       */
+
       const width =
         Math.min(
           requestedWidth,
@@ -1120,10 +1483,8 @@ app.get(
       );
 
       /*
-       * IMPORTANTE:
-       *
-       * Como el manifest usa SHA para detectar cambios,
-       * se puede usar cache largo para las variantes.
+       * Las cartas se invalidan
+       * mediante el manifest + SHA.
        */
 
       res.setHeader(
@@ -1132,7 +1493,7 @@ app.get(
       );
 
       /*
-       * SIN UPSCALE
+       * Nunca hacemos upscale.
        */
 
       if (
@@ -1232,13 +1593,8 @@ app.get(
         );
 
       /*
-       * NO DECLARAMOS:
-       *
-       * let outputBuffer: Buffer
-       *
-       * Esto evita la incompatibilidad
-       * Buffer<ArrayBuffer> /
-       * Buffer<ArrayBufferLike>.
+       * Preferimos WebP cuando
+       * el navegador lo admite.
        */
 
       if (
@@ -1282,6 +1638,10 @@ app.get(
           encoded
         );
       }
+
+      /*
+       * Fallback JPEG.
+       */
 
       const encoded =
         await canvas.encode(
@@ -1355,7 +1715,7 @@ app.get(
         ghConfig();
 
       /*
-       * MANIFEST SIEMPRE FRESCO
+       * Manifest siempre fresco.
        */
 
       const files =
@@ -1409,9 +1769,7 @@ app.get(
       const cards =
         files
           .map(
-            (
-              file
-            ) => {
+            (file) => {
               const match =
                 file.name.match(
                   /juli[\s_-]*0*(\d+)\b/i
@@ -1586,8 +1944,7 @@ async function pdfFirstPageToPng(
 
     const base =
       page.getViewport({
-        scale:
-          1,
+        scale: 1,
       });
 
     const maxSide =
@@ -1688,14 +2045,21 @@ app.post(
           });
       }
 
+      /*
+       * IMPORTANTE:
+       * ahora acepta GEMINI_API_KEY
+       * o cualquiera de las numeradas.
+       */
+
       if (
-        !GEMINI_API_KEY
+        GEMINI_API_KEYS.length ===
+        0
       ) {
         return res
           .status(500)
           .json({
             error:
-              "GEMINI_API_KEY no configurada",
+              "Gemini no configurado. Agregá GEMINI_API_KEY o GEMINI_API_KEY_1...GEMINI_API_KEY_10 en Render.",
           });
       }
 
@@ -1752,13 +2116,14 @@ app.post(
             ? "application/pdf"
             : "image/jpeg";
 
-      /*
-       * No tipamos dataBuffer como Buffer
-       * deliberadamente.
-       */
-
       let dataBuffer =
         originalBuffer;
+
+      /*
+       * Para PDF intentamos enviar
+       * solamente la primera página
+       * como PNG.
+       */
 
       if (
         isPdf
@@ -1786,100 +2151,43 @@ app.post(
           "base64"
         );
 
-      const geminiUrl =
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-          GEMINI_MODEL
-        )}:generateContent?key=${encodeURIComponent(
-          GEMINI_API_KEY
-        )}`;
-
-      const geminiResponse =
-        await fetch(
-          geminiUrl,
-          {
-            method:
-              "POST",
-
-            headers: {
-              "Content-Type":
-                "application/json",
-            },
-
-            body:
-              JSON.stringify({
-                contents: [
-                  {
-                    parts: [
-                      {
-                        text:
-                          prompt +
-                          "\n\nDevolvé ÚNICAMENTE un JSON válido, sin markdown ni texto adicional.",
-                      },
-
-                      {
-                        inline_data: {
-                          mime_type:
-                            mimeType,
-
-                          data:
-                            base64,
-                        },
-                      },
-                    ],
-                  },
-                ],
-
-                generation_config: {
-                  response_mime_type:
-                    "application/json",
-
-                  temperature:
-                    0.1,
-                },
-              }),
-          }
-        );
-
-      if (
-        !geminiResponse.ok
-      ) {
-        const text =
-          await geminiResponse.text();
-
-        return res
-          .status(502)
-          .json({
-            error:
-              "Gemini error: " +
-              text,
-          });
-      }
-
       const geminiJson =
-        await geminiResponse.json();
+        await callGemini({
+          contents: [
+            {
+              parts: [
+                {
+                  text:
+                    prompt +
+                    "\n\nDevolvé ÚNICAMENTE un JSON válido, sin markdown ni texto adicional.",
+                },
+
+                {
+                  inline_data: {
+                    mime_type:
+                      mimeType,
+
+                    data:
+                      base64,
+                  },
+                },
+              ],
+            },
+          ],
+
+          generation_config: {
+            response_mime_type:
+              "application/json",
+
+            temperature:
+              0.1,
+          },
+        });
 
       const text =
-        geminiJson &&
-        geminiJson.candidates &&
-        geminiJson.candidates[0] &&
-        geminiJson
-          .candidates[0]
-          .content &&
-        geminiJson
-          .candidates[0]
-          .content.parts &&
-        geminiJson
-          .candidates[0]
-          .content.parts[0] &&
-        geminiJson
-          .candidates[0]
-          .content.parts[0]
-          .text
-          ? geminiJson
-              .candidates[0]
-              .content.parts[0]
-              .text
-          : "";
+        extractGeminiText(
+          geminiJson
+        );
 
       let parsed =
         null;
@@ -1963,104 +2271,66 @@ app.post(
           });
       }
 
+      /*
+       * CORRECCIÓN PRINCIPAL:
+       *
+       * Ya no depende exclusivamente
+       * de GEMINI_API_KEY.
+       *
+       * Puede usar cualquiera de:
+       *
+       * GEMINI_API_KEY
+       * GEMINI_API_KEY_1
+       * ...
+       * GEMINI_API_KEY_10
+       */
+
       if (
-        !GEMINI_API_KEY
+        GEMINI_API_KEYS.length ===
+        0
       ) {
         return res
           .status(500)
           .json({
             error:
-              "GEMINI_API_KEY no configurada",
-          });
-      }
-
-      const geminiUrl =
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-          GEMINI_MODEL
-        )}:generateContent?key=${encodeURIComponent(
-          GEMINI_API_KEY
-        )}`;
-
-      const geminiResponse =
-        await fetch(
-          geminiUrl,
-          {
-            method:
-              "POST",
-
-            headers: {
-              "Content-Type":
-                "application/json",
-            },
-
-            body:
-              JSON.stringify({
-                contents: [
-                  {
-                    parts: [
-                      {
-                        text:
-                          prompt,
-                      },
-                    ],
-                  },
-                ],
-
-                generation_config: {
-                  temperature:
-                    0.85,
-
-                  max_output_tokens:
-                    2400,
-
-                  top_p:
-                    0.95,
-                },
-              }),
-          }
-        );
-
-      if (
-        !geminiResponse.ok
-      ) {
-        const text =
-          await geminiResponse.text();
-
-        return res
-          .status(502)
-          .json({
-            error:
-              "Gemini error: " +
-              text,
+              "Gemini no configurado. Configurá GEMINI_API_KEY o GEMINI_API_KEY_1...GEMINI_API_KEY_10 en Render.",
           });
       }
 
       const geminiJson =
-        await geminiResponse.json();
+        await callGemini({
+          contents: [
+            {
+              parts: [
+                {
+                  text:
+                    prompt,
+                },
+              ],
+            },
+          ],
+
+          generation_config: {
+            temperature:
+              0.85,
+
+            max_output_tokens:
+              2400,
+
+            top_p:
+              0.95,
+          },
+        });
 
       const candidate =
         geminiJson &&
-        geminiJson
-          .candidates &&
-        geminiJson
-          .candidates[0];
+        geminiJson.candidates &&
+        geminiJson.candidates[0];
 
       const text =
-        candidate &&
-        candidate.content &&
-        candidate.content.parts &&
-        candidate
-          .content
-          .parts[0] &&
-        candidate
-          .content
-          .parts[0]
-          .text
-          ? candidate
-              .content
-              .parts[0]
-              .text
-          : "";
+        extractGeminiText(
+          geminiJson
+        );
 
       if (
         !text &&
@@ -2074,8 +2344,18 @@ app.post(
           .json({
             error:
               "Gemini finishReason: " +
-              candidate
-                .finishReason,
+              candidate.finishReason,
+          });
+      }
+
+      if (
+        !text
+      ) {
+        return res
+          .status(502)
+          .json({
+            error:
+              "Gemini devolvió una respuesta vacía",
           });
       }
 
@@ -2083,6 +2363,9 @@ app.post(
         ok: true,
 
         text,
+
+        model:
+          GEMINI_MODEL,
       });
     } catch (
       error
@@ -2144,13 +2427,29 @@ app.listen(
     );
 
     console.log(
-      `Gemini: ${Boolean(
-        GEMINI_API_KEY
-      )}`
+      `Gemini configurado: ${
+        GEMINI_API_KEYS.length >
+        0
+      }`
+    );
+
+    console.log(
+      `Gemini API keys disponibles: ${GEMINI_API_KEYS.length}`
     );
 
     console.log(
       `Modelo: ${GEMINI_MODEL}`
+    );
+
+    console.log(
+      `GitHub configurado: ${Boolean(
+        process.env
+          .GITHUB_OWNER &&
+        process.env
+          .GITHUB_REPO &&
+        process.env
+          .GITHUB_TOKEN
+      )}`
     );
 
     console.log(
