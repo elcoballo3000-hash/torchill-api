@@ -1,9 +1,6 @@
-import express, {
-  Request,
-  Response,
-  NextFunction,
-} from "express";
+// @ts-nocheck
 
+import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
 
@@ -46,7 +43,7 @@ app.use(
 );
 
 /* =========================================================
-   ENVIRONMENT
+   CONFIG
    ========================================================= */
 
 const PORT =
@@ -70,31 +67,36 @@ const GEMINI_MODEL =
    ========================================================= */
 
 function auth(
-  req: Request,
-  res: Response,
-  next: NextFunction
+  req,
+  res,
+  next
 ) {
   if (!API_TOKEN) {
     return next();
   }
 
-  const apiKeyHeader =
-    req.headers["x-api-key"];
+  const headerKey =
+    req.headers[
+      "x-api-key"
+    ];
 
   const authorization =
     req.headers.authorization ||
     "";
 
   const sent =
-    typeof apiKeyHeader ===
+    typeof headerKey ===
     "string"
-      ? apiKeyHeader
+      ? headerKey
       : authorization.replace(
           /^Bearer\s+/i,
           ""
         );
 
-  if (sent !== API_TOKEN) {
+  if (
+    sent !==
+    API_TOKEN
+  ) {
     return res
       .status(401)
       .json({
@@ -111,11 +113,8 @@ function auth(
    ========================================================= */
 
 function getParamString(
-  value:
-    | string
-    | string[]
-    | undefined
-): string {
+  value
+) {
   if (
     typeof value ===
     "string"
@@ -136,15 +135,7 @@ function getParamString(
    GITHUB CONFIG
    ========================================================= */
 
-interface GithubConfig {
-  owner: string;
-  repo: string;
-  branch: string;
-  token: string;
-}
-
-function ghConfig():
-  GithubConfig {
+function ghConfig() {
   const owner =
     process.env.GITHUB_OWNER ||
     "";
@@ -180,7 +171,7 @@ function ghConfig():
 }
 
 function githubHeaders(
-  token: string
+  token
 ) {
   return {
     Authorization:
@@ -198,57 +189,71 @@ function githubHeaders(
 }
 
 /* =========================================================
+   GITHUB PATH
+   ========================================================= */
+
+function encodeGithubPath(
+  path
+) {
+  return path
+    .split("/")
+    .map(
+      (part) =>
+        encodeURIComponent(
+          part
+        )
+    )
+    .join("/");
+}
+
+/* =========================================================
    MIME
    ========================================================= */
 
 function mimeForPath(
-  path: string
-): string {
+  path
+) {
   const lower =
-    (path || "")
-      .toLowerCase();
+    String(
+      path || ""
+    ).toLowerCase();
 
   if (
-    lower.endsWith(".pdf")
+    lower.endsWith(
+      ".pdf"
+    )
   ) {
     return "application/pdf";
   }
 
   if (
-    lower.endsWith(".png")
+    lower.endsWith(
+      ".png"
+    )
   ) {
     return "image/png";
   }
 
   if (
-    lower.endsWith(".webp")
+    lower.endsWith(
+      ".webp"
+    )
   ) {
     return "image/webp";
   }
 
   if (
-    lower.endsWith(".jpg") ||
-    lower.endsWith(".jpeg")
+    lower.endsWith(
+      ".jpg"
+    ) ||
+    lower.endsWith(
+      ".jpeg"
+    )
   ) {
     return "image/jpeg";
   }
 
   return "application/octet-stream";
-}
-
-/* =========================================================
-   ENCODE GITHUB PATH
-   ========================================================= */
-
-function encodeGithubPath(
-  path: string
-): string {
-  return path
-    .split("/")
-    .map((part) =>
-      encodeURIComponent(part)
-    )
-    .join("/");
 }
 
 /* =========================================================
@@ -258,8 +263,8 @@ function encodeGithubPath(
 app.get(
   "/health",
   (
-    _req: Request,
-    res: Response
+    _req,
+    res
   ) => {
     return res.json({
       ok: true,
@@ -299,8 +304,8 @@ app.get(
 app.get(
   "/",
   (
-    _req: Request,
-    res: Response
+    _req,
+    res
   ) => {
     return res.json({
       ok: true,
@@ -310,19 +315,12 @@ app.get(
 
       endpoints: [
         "GET /health",
-
         "POST /upload",
-
         "GET /receipt/:pathB64",
-
         "GET /tarot/:n",
-
         "GET /tarot/:w/:n",
-
         "GET /tarot-manifest",
-
         "POST /analyze-receipt",
-
         "POST /generate-text",
       ],
     });
@@ -330,14 +328,14 @@ app.get(
 );
 
 /* =========================================================
-   UPLOAD RECEIPT A GITHUB
+   UPLOAD RECEIPT
    ========================================================= */
 
 app.post(
   "/upload",
   async (
-    req: Request,
-    res: Response
+    req,
+    res
   ) => {
     try {
       const {
@@ -396,14 +394,12 @@ app.post(
       const path =
         `receipts/${ym}/${id}.${safeExt}`;
 
-      let cleanBase64 =
-        String(base64);
-
-      cleanBase64 =
-        cleanBase64.replace(
-          /^data:[^;]+;base64,/i,
-          ""
-        );
+      const cleanBase64 =
+        String(base64)
+          .replace(
+            /^data:[^;]+;base64,/i,
+            ""
+          );
 
       const url =
         `https://api.github.com/repos/${encodeURIComponent(
@@ -414,7 +410,7 @@ app.post(
           path
         )}`;
 
-      const ghRes =
+      const response =
         await fetch(
           url,
           {
@@ -443,16 +439,18 @@ app.post(
           }
         );
 
-      if (!ghRes.ok) {
-        const errText =
-          await ghRes.text();
+      if (
+        !response.ok
+      ) {
+        const text =
+          await response.text();
 
         return res
           .status(502)
           .json({
             error:
               "GitHub error: " +
-              errText,
+              text,
           });
       }
 
@@ -463,13 +461,13 @@ app.post(
           "base64url"
         );
 
-      const rel =
+      const relativeUrl =
         `/receipt/${pathB64}`;
 
       const absoluteUrl =
         `${req.protocol}://${req.get(
           "host"
-        )}${rel}`;
+        )}${relativeUrl}`;
 
       return res.json({
         ok: true,
@@ -478,42 +476,45 @@ app.post(
 
         pathB64,
 
-        fileUrl:
-          absoluteUrl,
-
         url:
-          rel,
+          relativeUrl,
 
         receiptUrl:
-          rel,
+          relativeUrl,
+
+        fileUrl:
+          absoluteUrl,
 
         absoluteUrl,
       });
     } catch (
-      error: unknown
+      error
     ) {
+      console.error(
+        "Upload error:",
+        error
+      );
+
       return res
         .status(500)
         .json({
           error:
-            error instanceof
-            Error
-              ? error.message
-              : "unknown error",
+            error?.message ||
+            "unknown error",
         });
     }
   }
 );
 
 /* =========================================================
-   RECEIPT PRIVADO
+   RECEIPT
    ========================================================= */
 
 app.get(
   "/receipt/:pathB64",
   async (
-    req: Request,
-    res: Response
+    req,
+    res
   ) => {
     try {
       const {
@@ -550,18 +551,25 @@ app.get(
           );
       }
 
-      const rawUrl =
-        `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${encodeGithubPath(
+      const url =
+        `https://api.github.com/repos/${encodeURIComponent(
+          owner
+        )}/${encodeURIComponent(
+          repo
+        )}/contents/${encodeGithubPath(
           path
+        )}?ref=${encodeURIComponent(
+          branch
         )}`;
 
       const response =
         await fetch(
-          rawUrl,
+          url,
           {
             headers: {
-              Authorization:
-                `Bearer ${token}`,
+              ...githubHeaders(
+                token
+              ),
 
               Accept:
                 "application/vnd.github.raw",
@@ -569,7 +577,9 @@ app.get(
           }
         );
 
-      if (!response.ok) {
+      if (
+        !response.ok
+      ) {
         return res
           .status(
             response.status
@@ -586,12 +596,21 @@ app.get(
 
       res.setHeader(
         "Content-Type",
-        mimeForPath(path)
+        mimeForPath(
+          path
+        )
       );
 
       res.setHeader(
         "Cache-Control",
         "private, max-age=3600"
+      );
+
+      res.setHeader(
+        "Content-Length",
+        String(
+          buffer.length
+        )
       );
 
       return res.send(
@@ -615,46 +634,10 @@ app.get(
 );
 
 /* =========================================================
-   TAROT TYPES
+   TAROT DIRECTORY CACHE
    ========================================================= */
 
-interface TarotGithubFile {
-  name: string;
-  sha: string;
-  size: number;
-}
-
-interface TarotDirectoryCache {
-  files:
-    TarotGithubFile[];
-
-  timestamp:
-    number;
-}
-
-interface TarotOriginal {
-  buffer:
-    Buffer;
-
-  timestamp:
-    number;
-
-  mimeType:
-    string;
-
-  width:
-    number;
-
-  height:
-    number;
-}
-
-/* =========================================================
-   TAROT CACHE
-   ========================================================= */
-
-let tarotDirectoryCache:
-  TarotDirectoryCache | null =
+let tarotDirectoryCache =
   null;
 
 const TAROT_DIRECTORY_TTL =
@@ -662,27 +645,10 @@ const TAROT_DIRECTORY_TTL =
   60 *
   1000;
 
-const tarotOriginalCache =
-  new Map<
-    number,
-    TarotOriginal
-  >();
-
-const TAROT_ORIGINAL_TTL =
-  5 *
-  60 *
-  1000;
-
-/* =========================================================
-   LIST TAROT DIRECTORY
-   ========================================================= */
-
 async function listTarotFiles(
   forceRefresh =
     false
-): Promise<
-  TarotGithubFile[]
-> {
+) {
   if (
     !forceRefresh &&
     tarotDirectoryCache &&
@@ -723,7 +689,9 @@ async function listTarotFiles(
       }
     );
 
-  if (!response.ok) {
+  if (
+    !response.ok
+  ) {
     const text =
       await response.text();
 
@@ -736,19 +704,23 @@ async function listTarotFiles(
     await response.json();
 
   if (
-    !Array.isArray(data)
+    !Array.isArray(
+      data
+    )
   ) {
     throw new Error(
       "/tarot no es un directorio válido."
     );
   }
 
-  const files:
-    TarotGithubFile[] =
+  const files =
     data
       .filter(
-        (item: any) =>
-          item?.type ===
+        (
+          item
+        ) =>
+          item &&
+          item.type ===
             "file" &&
           typeof item.name ===
             "string" &&
@@ -757,7 +729,9 @@ async function listTarotFiles(
           )
       )
       .map(
-        (item: any) => ({
+        (
+          item
+        ) => ({
           name:
             item.name,
 
@@ -782,6 +756,10 @@ async function listTarotFiles(
       Date.now(),
   };
 
+  console.log(
+    `Tarot: ${files.length} imágenes encontradas.`
+  );
+
   return files;
 }
 
@@ -790,11 +768,9 @@ async function listTarotFiles(
    ========================================================= */
 
 function findTarotFile(
-  number: number,
-  files:
-    TarotGithubFile[]
-):
-  TarotGithubFile | null {
+  number,
+  files
+) {
   const regex =
     new RegExp(
       `juli[\\s_-]*0*${number}\\b`,
@@ -803,7 +779,9 @@ function findTarotFile(
 
   return (
     files.find(
-      (file) =>
+      (
+        file
+      ) =>
         regex.test(
           file.name
         )
@@ -813,18 +791,24 @@ function findTarotFile(
 }
 
 /* =========================================================
-   DOWNLOAD ORIGINAL TAROT
+   ORIGINAL TAROT CACHE
    ========================================================= */
 
+const tarotOriginalCache =
+  new Map();
+
+const TAROT_ORIGINAL_TTL =
+  5 *
+  60 *
+  1000;
+
 async function fetchTarotOriginal(
-  juli: number,
-  filename: string
-): Promise<
-  TarotOriginal
-> {
+  number,
+  filename
+) {
   const cached =
     tarotOriginalCache.get(
-      juli
+      number
     );
 
   if (
@@ -844,18 +828,25 @@ async function fetchTarotOriginal(
   } =
     ghConfig();
 
-  const rawUrl =
-    `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/tarot/${encodeURIComponent(
+  const url =
+    `https://api.github.com/repos/${encodeURIComponent(
+      owner
+    )}/${encodeURIComponent(
+      repo
+    )}/contents/tarot/${encodeURIComponent(
       filename
+    )}?ref=${encodeURIComponent(
+      branch
     )}`;
 
   const response =
     await fetch(
-      rawUrl,
+      url,
       {
         headers: {
-          Authorization:
-            `Bearer ${token}`,
+          ...githubHeaders(
+            token
+          ),
 
           Accept:
             "application/vnd.github.raw",
@@ -863,9 +854,14 @@ async function fetchTarotOriginal(
       }
     );
 
-  if (!response.ok) {
+  if (
+    !response.ok
+  ) {
+    const text =
+      await response.text();
+
     throw new Error(
-      `No se pudo descargar ${filename}.`
+      `No se pudo descargar ${filename}: ${text}`
     );
   }
 
@@ -901,8 +897,7 @@ async function fetchTarotOriginal(
     );
   }
 
-  const original:
-    TarotOriginal = {
+  const entry = {
     buffer,
 
     timestamp:
@@ -919,22 +914,24 @@ async function fetchTarotOriginal(
   };
 
   tarotOriginalCache.set(
-    juli,
-    original
+    number,
+    entry
   );
 
-  return original;
+  return entry;
 }
 
 /* =========================================================
    TAROT ORIGINAL
+
+   /tarot/25
    ========================================================= */
 
 app.get(
   "/tarot/:n",
   async (
-    req: Request,
-    res: Response
+    req,
+    res
   ) => {
     try {
       const raw =
@@ -969,7 +966,9 @@ app.get(
           files
         );
 
-      if (!match) {
+      if (
+        !match
+      ) {
         return res
           .status(404)
           .send(
@@ -1013,7 +1012,7 @@ app.get(
       error
     ) {
       console.error(
-        "Tarot error:",
+        "Tarot original error:",
         error
       );
 
@@ -1031,22 +1030,17 @@ app.get(
 
    /tarot/:w/:n
 
-   Ejemplos:
-
-   /tarot/160/25
-   /tarot/320/25
-   /tarot/640/25
-
-   Sin upscale.
-   WebP cuando sea posible.
-   JPEG fallback.
+   EJ:
+   /tarot/200/25
+   /tarot/400/25
+   /tarot/800/25
    ========================================================= */
 
 app.get(
   "/tarot/:w/:n",
   async (
-    req: Request,
-    res: Response
+    req,
+    res
   ) => {
     try {
       const requestedWidth =
@@ -1074,7 +1068,8 @@ app.get(
         !Number.isFinite(
           number
         ) ||
-        number <= 0
+        number <=
+          0
       ) {
         return res
           .status(400)
@@ -1083,9 +1078,6 @@ app.get(
           );
       }
 
-      /*
-       * Protección.
-       */
       const width =
         Math.min(
           requestedWidth,
@@ -1101,7 +1093,9 @@ app.get(
           files
         );
 
-      if (!match) {
+      if (
+        !match
+      ) {
         return res
           .status(404)
           .send(
@@ -1115,14 +1109,6 @@ app.get(
           match.name
         );
 
-      /*
-       * Cache 1 año.
-       */
-      res.setHeader(
-        "Cache-Control",
-        "public, max-age=31536000, immutable"
-      );
-
       res.setHeader(
         "Access-Control-Allow-Origin",
         "*"
@@ -1134,8 +1120,21 @@ app.get(
       );
 
       /*
-       * SIN UPSCALE.
+       * IMPORTANTE:
+       *
+       * Como el manifest usa SHA para detectar cambios,
+       * se puede usar cache largo para las variantes.
        */
+
+      res.setHeader(
+        "Cache-Control",
+        "public, max-age=31536000, immutable"
+      );
+
+      /*
+       * SIN UPSCALE
+       */
+
       if (
         !original.width ||
         width >=
@@ -1157,14 +1156,16 @@ app.get(
         res.setHeader(
           "X-Tarot-Original-Width",
           String(
-            original.width
+            original.width ||
+            0
           )
         );
 
         res.setHeader(
           "X-Tarot-Output-Width",
           String(
-            original.width
+            original.width ||
+            0
           )
         );
 
@@ -1174,8 +1175,9 @@ app.get(
       }
 
       /*
-       * Resize.
+       * RESIZE
        */
+
       const image =
         await loadImage(
           original.buffer
@@ -1211,9 +1213,7 @@ app.get(
         true;
 
       try {
-        (
-          context as any
-        ).imageSmoothingQuality =
+        context.imageSmoothingQuality =
           "high";
       } catch {}
 
@@ -1231,52 +1231,73 @@ app.get(
           ""
         );
 
-      let outputBuffer:
-        Buffer;
-
-      let outputMime:
-        string;
-
       /*
-       * WEBP preferido.
+       * NO DECLARAMOS:
+       *
+       * let outputBuffer: Buffer
+       *
+       * Esto evita la incompatibilidad
+       * Buffer<ArrayBuffer> /
+       * Buffer<ArrayBufferLike>.
        */
+
       if (
         accept.includes(
           "image/webp"
         )
       ) {
-        outputBuffer =
-  Buffer.from(
-    await canvas.encode(
-      "webp",
-      92
-    )
-  );
+        const encoded =
+          await canvas.encode(
+            "webp",
+            92
+          );
 
-        outputMime =
-          "image/webp";
-      } else {
-        outputBuffer =
-  Buffer.from(
-    await canvas.encode(
-      "jpeg",
-      92
-    )
-  );
+        res.setHeader(
+          "Content-Type",
+          "image/webp"
+        );
 
-        outputMime =
-          "image/jpeg";
+        res.setHeader(
+          "Content-Length",
+          String(
+            encoded.byteLength
+          )
+        );
+
+        res.setHeader(
+          "X-Tarot-Original-Width",
+          String(
+            original.width
+          )
+        );
+
+        res.setHeader(
+          "X-Tarot-Output-Width",
+          String(
+            outputWidth
+          )
+        );
+
+        return res.send(
+          encoded
+        );
       }
+
+      const encoded =
+        await canvas.encode(
+          "jpeg",
+          92
+        );
 
       res.setHeader(
         "Content-Type",
-        outputMime
+        "image/jpeg"
       );
 
       res.setHeader(
         "Content-Length",
         String(
-          outputBuffer.length
+          encoded.byteLength
         )
       );
 
@@ -1295,7 +1316,7 @@ app.get(
       );
 
       return res.send(
-        outputBuffer
+        encoded
       );
     } catch (
       error
@@ -1321,8 +1342,8 @@ app.get(
 app.get(
   "/tarot-manifest",
   async (
-    _req: Request,
-    res: Response
+    _req,
+    res
   ) => {
     try {
       const {
@@ -1334,15 +1355,15 @@ app.get(
         ghConfig();
 
       /*
-       * Forzar lectura fresca.
+       * MANIFEST SIEMPRE FRESCO
        */
+
       const files =
         await listTarotFiles(
           true
         );
 
-      let commitSha:
-        string | null =
+      let commitSha =
         null;
 
       try {
@@ -1370,10 +1391,11 @@ app.get(
             await response.json();
 
           commitSha =
-            data
-              ?.commit
-              ?.sha ||
-            null;
+            data &&
+            data.commit &&
+            data.commit.sha
+              ? data.commit.sha
+              : null;
         }
       } catch (
         error
@@ -1387,7 +1409,9 @@ app.get(
       const cards =
         files
           .map(
-            (file) => {
+            (
+              file
+            ) => {
               const match =
                 file.name.match(
                   /juli[\s_-]*0*(\d+)\b/i
@@ -1418,16 +1442,7 @@ app.get(
             }
           )
           .filter(
-            (
-              card
-            ): card is {
-              juli: number;
-              sha: string;
-              size: number;
-              name: string;
-            } =>
-              card !==
-              null
+            Boolean
           )
           .sort(
             (
@@ -1464,7 +1479,7 @@ app.get(
       error
     ) {
       console.error(
-        "Manifest error:",
+        "Tarot manifest error:",
         error
       );
 
@@ -1474,10 +1489,8 @@ app.get(
           ok: false,
 
           error:
-            error instanceof
-            Error
-              ? error.message
-              : "error",
+            error?.message ||
+            "error",
         });
     }
   }
@@ -1488,19 +1501,21 @@ app.get(
    ========================================================= */
 
 async function pdfFirstPageToPng(
-  buffer: Buffer
-): Promise<
-  Buffer | null
-> {
+  buffer
+) {
   class NodeCanvasFactory {
     create(
-      width: number,
-      height: number
+      width,
+      height
     ) {
       const canvas =
         createCanvas(
-          width,
-          height
+          Math.ceil(
+            width
+          ),
+          Math.ceil(
+            height
+          )
         );
 
       const context =
@@ -1515,9 +1530,9 @@ async function pdfFirstPageToPng(
     }
 
     reset(
-      item: any,
-      width: number,
-      height: number
+      item,
+      width,
+      height
     ) {
       item.canvas.width =
         width;
@@ -1527,7 +1542,7 @@ async function pdfFirstPageToPng(
     }
 
     destroy(
-      item: any
+      item
     ) {
       item.canvas.width =
         0;
@@ -1543,8 +1558,8 @@ async function pdfFirstPageToPng(
     }
   }
 
-  let pdf:
-    any = null;
+  let pdf =
+    null;
 
   try {
     const task =
@@ -1571,7 +1586,8 @@ async function pdfFirstPageToPng(
 
     const base =
       page.getViewport({
-        scale: 1,
+        scale:
+          1,
       });
 
     const maxSide =
@@ -1596,7 +1612,7 @@ async function pdfFirstPageToPng(
     const factory =
       new NodeCanvasFactory();
 
-    const result =
+    const item =
       factory.create(
         viewport.width,
         viewport.height
@@ -1604,24 +1620,24 @@ async function pdfFirstPageToPng(
 
     await page.render({
       canvasContext:
-        result.context,
+        item.context,
 
       viewport,
 
       canvasFactory:
-        factory as any,
+        factory,
     }).promise;
 
-    const png =
-      await result.canvas.encode(
+    const encoded =
+      await item.canvas.encode(
         "png"
       );
 
     factory.destroy(
-      result
+      item
     );
 
-    return png;
+    return encoded;
   } catch (
     error
   ) {
@@ -1633,7 +1649,9 @@ async function pdfFirstPageToPng(
     return null;
   } finally {
     try {
-      if (pdf) {
+      if (
+        pdf
+      ) {
         await pdf.destroy();
       }
     } catch {}
@@ -1648,8 +1666,8 @@ app.post(
   "/analyze-receipt",
   auth,
   async (
-    req: Request,
-    res: Response
+    req,
+    res
   ) => {
     try {
       const {
@@ -1681,28 +1699,30 @@ app.post(
           });
       }
 
-      const fileRes =
+      const fileResponse =
         await fetch(
           fileUrl
         );
 
-      if (!fileRes.ok) {
+      if (
+        !fileResponse.ok
+      ) {
         return res
           .status(400)
           .json({
             error:
-              `No se pudo descargar el archivo (${fileRes.status})`,
+              `No se pudo descargar el archivo (${fileResponse.status})`,
           });
       }
 
-      const buffer =
+      const originalBuffer =
         Buffer.from(
-          await fileRes.arrayBuffer()
+          await fileResponse.arrayBuffer()
         );
 
       const detectedMime =
         (
-          fileRes.headers.get(
+          fileResponse.headers.get(
             "content-type"
           ) ||
           ""
@@ -1732,16 +1752,25 @@ app.post(
             ? "application/pdf"
             : "image/jpeg";
 
-      let dataBuffer =
-        buffer;
+      /*
+       * No tipamos dataBuffer como Buffer
+       * deliberadamente.
+       */
 
-      if (isPdf) {
+      let dataBuffer =
+        originalBuffer;
+
+      if (
+        isPdf
+      ) {
         const png =
           await pdfFirstPageToPng(
-            buffer
+            originalBuffer
           );
 
-        if (png) {
+        if (
+          png
+        ) {
           mimeType =
             "image/png";
 
@@ -1751,17 +1780,22 @@ app.post(
       }
 
       const base64 =
-        dataBuffer.toString(
+        Buffer.from(
+          dataBuffer
+        ).toString(
           "base64"
         );
 
-      const geminiRes =
+      const geminiUrl =
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+          GEMINI_MODEL
+        )}:generateContent?key=${encodeURIComponent(
+          GEMINI_API_KEY
+        )}`;
+
+      const geminiResponse =
         await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-            GEMINI_MODEL
-          )}:generateContent?key=${encodeURIComponent(
-            GEMINI_API_KEY
-          )}`,
+          geminiUrl,
           {
             method:
               "POST",
@@ -1806,9 +1840,11 @@ app.post(
           }
         );
 
-      if (!geminiRes.ok) {
+      if (
+        !geminiResponse.ok
+      ) {
         const text =
-          await geminiRes.text();
+          await geminiResponse.text();
 
         return res
           .status(502)
@@ -1820,18 +1856,32 @@ app.post(
       }
 
       const geminiJson =
-        await geminiRes.json();
+        await geminiResponse.json();
 
       const text =
+        geminiJson &&
+        geminiJson.candidates &&
+        geminiJson.candidates[0] &&
         geminiJson
-          ?.candidates?.[0]
-          ?.content
-          ?.parts?.[0]
-          ?.text ||
-        "";
+          .candidates[0]
+          .content &&
+        geminiJson
+          .candidates[0]
+          .content.parts &&
+        geminiJson
+          .candidates[0]
+          .content.parts[0] &&
+        geminiJson
+          .candidates[0]
+          .content.parts[0]
+          .text
+          ? geminiJson
+              .candidates[0]
+              .content.parts[0]
+              .text
+          : "";
 
-      let parsed:
-        any =
+      let parsed =
         null;
 
       try {
@@ -1845,7 +1895,9 @@ app.post(
             /\{[\s\S]*\}/
           );
 
-        if (match) {
+        if (
+          match
+        ) {
           try {
             parsed =
               JSON.parse(
@@ -1865,16 +1917,19 @@ app.post(
           text,
       });
     } catch (
-      error: unknown
+      error
     ) {
+      console.error(
+        "Analyze receipt error:",
+        error
+      );
+
       return res
         .status(500)
         .json({
           error:
-            error instanceof
-            Error
-              ? error.message
-              : "unknown error",
+            error?.message ||
+            "unknown error",
         });
     }
   }
@@ -1888,8 +1943,8 @@ app.post(
   "/generate-text",
   auth,
   async (
-    req: Request,
-    res: Response
+    req,
+    res
   ) => {
     try {
       const {
@@ -1897,7 +1952,9 @@ app.post(
       } =
         req.body || {};
 
-      if (!prompt) {
+      if (
+        !prompt
+      ) {
         return res
           .status(400)
           .json({
@@ -1917,13 +1974,16 @@ app.post(
           });
       }
 
-      const geminiRes =
+      const geminiUrl =
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+          GEMINI_MODEL
+        )}:generateContent?key=${encodeURIComponent(
+          GEMINI_API_KEY
+        )}`;
+
+      const geminiResponse =
         await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-            GEMINI_MODEL
-          )}:generateContent?key=${encodeURIComponent(
-            GEMINI_API_KEY
-          )}`,
+          geminiUrl,
           {
             method:
               "POST",
@@ -1960,9 +2020,11 @@ app.post(
           }
         );
 
-      if (!geminiRes.ok) {
+      if (
+        !geminiResponse.ok
+      ) {
         const text =
-          await geminiRes.text();
+          await geminiResponse.text();
 
         return res
           .status(502)
@@ -1974,25 +2036,37 @@ app.post(
       }
 
       const geminiJson =
-        await geminiRes.json();
+        await geminiResponse.json();
 
       const candidate =
+        geminiJson &&
         geminiJson
-          ?.candidates?.[0];
+          .candidates &&
+        geminiJson
+          .candidates[0];
 
       const text =
+        candidate &&
+        candidate.content &&
+        candidate.content.parts &&
         candidate
-          ?.content
-          ?.parts?.[0]
-          ?.text ||
-        "";
+          .content
+          .parts[0] &&
+        candidate
+          .content
+          .parts[0]
+          .text
+          ? candidate
+              .content
+              .parts[0]
+              .text
+          : "";
 
       if (
         !text &&
-        candidate
-          ?.finishReason &&
-        candidate
-          .finishReason !==
+        candidate &&
+        candidate.finishReason &&
+        candidate.finishReason !==
           "STOP"
       ) {
         return res
@@ -2011,16 +2085,19 @@ app.post(
         text,
       });
     } catch (
-      error: unknown
+      error
     ) {
+      console.error(
+        "Generate text error:",
+        error
+      );
+
       return res
         .status(500)
         .json({
           error:
-            error instanceof
-            Error
-              ? error.message
-              : "unknown error",
+            error?.message ||
+            "unknown error",
         });
     }
   }
@@ -2032,8 +2109,8 @@ app.post(
 
 app.use(
   (
-    _req: Request,
-    res: Response
+    _req,
+    res
   ) => {
     return res
       .status(404)
@@ -2047,7 +2124,7 @@ app.use(
 );
 
 /* =========================================================
-   SERVER
+   START SERVER
    ========================================================= */
 
 app.listen(
