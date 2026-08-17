@@ -671,11 +671,9 @@ function extractTarotNumbersFromGithubPush(body: any): number[] {
     // receipts/* y cualquier otra carpeta del mismo repo quedan ignoradas.
     if (!/^tarot\//i.test(path)) continue;
 
-    const match = path.match(/juli[\s_-]*0*(\d+)\b/i);
-    if (!match) continue;
-
-    const number = Number.parseInt(match[1], 10);
-    if (Number.isInteger(number) && number > 0) numbers.add(number);
+    const filename = path.split('/').pop() || '';
+    const number = getTarotNumberFromFilename(filename);
+    if (number !== null) numbers.add(number);
   }
 
   return [...numbers].sort((a, b) => a - b);
@@ -943,9 +941,29 @@ async function listTarotFiles(forceRefresh = false): Promise<TarotFile[]> {
   return files;
 }
 
+function getTarotNumberFromFilename(filename: string): number | null {
+  // Formato real actual:
+  // "tarot juli-1.jpg"
+  // "tarot juli-10.jpg"
+  // "tarot juli-78.webp"
+  //
+  // También tolera espacios, "_" y ceros iniciales:
+  // "tarot_juli_01.jpg", "juli 001.png", etc.
+  const match = filename.match(
+    /(?:^|[\s_-])juli[\s_-]*0*(\d+)(?=\D|$)/i
+  );
+
+  if (!match) return null;
+
+  const number = Number.parseInt(match[1], 10);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
 function findTarotFile(number: number, files: TarotFile[]): TarotFile | null {
-  const regex = new RegExp(`juli[\\s_-]*0*${number}(?=\\D|$)`, 'i');
-  return files.find((file) => regex.test(file.name)) || null;
+  return (
+    files.find((file) => getTarotNumberFromFilename(file.name) === number) ||
+    null
+  );
 }
 
 async function fetchTarotOriginal(number: number, file: TarotFile) {
@@ -1273,10 +1291,10 @@ app.get('/tarot-manifest', auth, async (_req: Request, res: Response) => {
 
     const cards = files
       .map((file) => {
-        const match = file.name.match(/juli[\s_-]*0*(\d+)\b/i);
-        if (!match) return null;
+        const number = getTarotNumberFromFilename(file.name);
+        if (number === null) return null;
         return {
-          juli: Number.parseInt(match[1], 10),
+          juli: number,
           sha: file.sha,
           size: file.size,
           name: file.name,
@@ -1331,8 +1349,8 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
           .filter((value: number) => Number.isInteger(value) && value > 0)
       : files
           .map((file) => {
-            const match = file.name.match(/juli[\s_-]*0*(\d+)\b/i);
-            return match ? Number.parseInt(match[1], 10) : NaN;
+            const number = getTarotNumberFromFilename(file.name);
+            return number ?? NaN;
           })
           .filter((value) => Number.isInteger(value) && value > 0);
 
@@ -1478,11 +1496,11 @@ app.get('/api/tarot/manifest', auth, async (_req: Request, res: Response) => {
 
     const cards = files
       .map((file) => {
-        const match = file.name.match(/juli[\s_-]*0*(\d+)\b/i);
-        if (!match) return null;
+        const number = getTarotNumberFromFilename(file.name);
+        if (number === null) return null;
 
         return {
-          juli: Number.parseInt(match[1], 10),
+          juli: number,
           name: file.name,
           sha: file.sha,
           size: file.size,
@@ -1955,6 +1973,7 @@ app.listen(PORT, '0.0.0.0', () => {
     )}`
   );
   console.log(`R2 bucket: ${process.env.R2_BUCKET || 'NO CONFIGURADO'}`);
+  console.log('Tarot filename pattern: tarot juli-N.ext');
   console.log('PDF modes: auto | image | native');
   console.log('--------------------------------------');
   console.log('GET  /health');
