@@ -2,21 +2,28 @@
   "name": "torchill-api",
   "version": "1.0.0",
   "private": true,
-  "scripts": {"build":"tsc","start":"node dist/server.js"},
-  "engines": {"node":"20.x"},
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "engines": {
+    "node": "20.x"
+  },
   "dependencies": {
     "@google/genai": "^2.3.0",
     "@napi-rs/canvas": "^0.1.77",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "multer": "^2.0.2",
-    "pdfjs-dist": "^3.11.174"
+    "pdfjs-dist": "^3.11.174",
+    "@aws-sdk/client-s3": "^3.887.0",
+    "@aws-sdk/s3-request-presigner": "^3.887.0"
   },
   "devDependencies": {
-    "@types/cors":"^2.8.17",
-    "@types/express":"^5.0.3",
-    "@types/multer":"^2.0.0",
-    "@types/node":"^24.0.0",
-    "typescript":"^5.9.2"
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.3",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.2"
   }
 }
