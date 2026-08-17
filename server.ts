@@ -588,6 +588,14 @@ function tarotBackR2Key(width: number | 'original'): string {
   return `tarot/${width}/dorso.webp`;
 }
 
+function brandMarkR2Key(width: number | 'original'): string {
+  if (width === 'original') {
+    return 'tarot/brand/original/signo-marcario.webp';
+  }
+
+  return `tarot/brand/${width}/signo-marcario.webp`;
+}
+
 async function r2HasSameSourceSha(key: string, sourceSha: string): Promise<boolean> {
   const { bucket } = r2Config();
 
@@ -765,6 +773,89 @@ async function syncTarotBackToR2(
   };
 }
 
+
+async function putBrandMarkVariantToR2(
+  width: number | 'original',
+  buffer: Buffer,
+  sourceSha: string
+): Promise<string> {
+  const { bucket } = r2Config();
+  const key = brandMarkR2Key(width);
+
+  await getR2Client().send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: 'image/webp',
+      CacheControl: 'private, max-age=600',
+      Metadata: {
+        source_sha: sourceSha,
+        asset: 'signo-marcario',
+        width: String(width),
+      },
+    })
+  );
+
+  return key;
+}
+
+async function syncBrandMarkToR2(
+  files: TarotFile[],
+  force = false
+) {
+  const file = findBrandMarkFile(files);
+
+  if (!file) {
+    return {
+      asset: 'signo-marcario',
+      ok: false,
+      skipped: false,
+      error:
+        'No se encontró Signo-marcario.jpg/jpeg/png/webp dentro de GitHub /tarot.',
+    };
+  }
+
+  const probeKey = brandMarkR2Key(640);
+
+  if (!force && await r2HasSameSourceSha(probeKey, file.sha)) {
+    return {
+      asset: 'signo-marcario',
+      ok: true,
+      skipped: true,
+      sourceName: file.name,
+      sourceSha: file.sha,
+    };
+  }
+
+  const source = await fetchTarotFileBuffer(file);
+  const variants = await encodeTarotVariants(source);
+  const uploaded = [];
+
+  for (const variant of variants) {
+    const key = await putBrandMarkVariantToR2(
+      variant.width,
+      variant.buffer,
+      file.sha
+    );
+
+    uploaded.push({
+      width: variant.width,
+      key,
+      bytes: variant.buffer.length,
+    });
+  }
+
+  return {
+    asset: 'signo-marcario',
+    ok: true,
+    skipped: false,
+    sourceName: file.name,
+    sourceSha: file.sha,
+    variants: uploaded,
+  };
+}
+
 async function syncTarotCardToR2(
   number: number,
   files: TarotFile[],
@@ -885,6 +976,22 @@ async function createTarotBackSignedUrl(
   );
 }
 
+async function createBrandMarkSignedUrl(
+  width: number | 'original',
+  expiresIn: number
+): Promise<string> {
+  const { bucket } = r2Config();
+
+  return getSignedUrl(
+    getR2Client(),
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: brandMarkR2Key(width),
+    }),
+    { expiresIn }
+  );
+}
+
 function verifyGithubWebhookSignature(req: Request): boolean {
   const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim() || '';
   if (!secret) return false;
@@ -926,6 +1033,27 @@ function githubPushChangedTarotBack(body: any): boolean {
 
         const filename = path.split('/').pop() || '';
         if (isTarotBackFilename(filename)) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+
+function githubPushChangedBrandMark(body: any): boolean {
+  const commits = Array.isArray(body?.commits) ? body.commits : [];
+
+  for (const commit of commits) {
+    for (const group of ['added', 'modified', 'removed']) {
+      const paths = Array.isArray(commit?.[group]) ? commit[group] : [];
+
+      for (const path of paths) {
+        if (typeof path !== 'string') continue;
+        if (!/^tarot\//i.test(path)) continue;
+
+        const filename = path.split('/').pop() || '';
+        if (isBrandMarkFilename(filename)) return true;
       }
     }
   }
@@ -1256,6 +1384,14 @@ function isTarotBackFilename(filename: string): boolean {
 
 function findTarotBackFile(files: TarotFile[]): TarotFile | null {
   return files.find((file) => isTarotBackFilename(file.name)) || null;
+}
+
+function isBrandMarkFilename(filename: string): boolean {
+  return /^signo-marcario\.(jpg|jpeg|png|webp)$/i.test(filename.trim());
+}
+
+function findBrandMarkFile(files: TarotFile[]): TarotFile | null {
+  return files.find((file) => isBrandMarkFilename(file.name)) || null;
 }
 
 async function fetchTarotOriginal(number: number, file: TarotFile) {
@@ -1679,9 +1815,15 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
       body.back === true ||
       String(body.back || '') === '1';
 
+    const brandRequested =
+      String(req.query.brand || '') === '1' ||
+      body.brand === true ||
+      String(body.brand || '') === '1';
+
     const results = await syncTarotNumbersToR2(numbers, force);
 
     let backResult: any = null;
+    let brandResult: any = null;
 
     if (backRequested) {
       try {
@@ -1689,6 +1831,19 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
       } catch (error: unknown) {
         backResult = {
           asset: 'dorso',
+          ok: false,
+          skipped: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    if (brandRequested) {
+      try {
+        brandResult = await syncBrandMarkToR2(files, force);
+      } catch (error: unknown) {
+        brandResult = {
+          asset: 'signo-marcario',
           ok: false,
           skipped: false,
           error: error instanceof Error ? error.message : String(error),
@@ -1709,14 +1864,16 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
     ).length;
 
     const backFailed = backResult && !backResult.ok ? 1 : 0;
+    const brandFailed = brandResult && !brandResult.ok ? 1 : 0;
 
-    return res.status(failed + backFailed > 0 ? 207 : 200).json({
-      ok: failed === 0 && backFailed === 0,
+    return res.status(failed + backFailed + brandFailed > 0 ? 207 : 200).json({
+      ok: failed === 0 && backFailed === 0 && brandFailed === 0,
       requested: [...new Set(numbers)].length,
       synced,
       skipped,
       failed,
       back: backResult,
+      brand: brandResult,
       results,
     });
   } catch (error: unknown) {
@@ -1913,12 +2070,16 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
       String(req.query.back || '') === '1' ||
       String(req.query.includeBack || '') === '1';
 
-    if (cards.length === 0 && !includeBack) {
+    const includeBrand =
+      String(req.query.brand || '') === '1' ||
+      String(req.query.includeBrand || '') === '1';
+
+    if (cards.length === 0 && !includeBack && !includeBrand) {
       return res.status(400).json({
         ok: false,
         error:
-          'cards es requerido salvo que uses back=1. ' +
-          'Ejemplo: ?cards=10&widths=640 o ?back=1&widths=640',
+          'cards es requerido salvo que uses back=1 o brand=1. ' +
+          'Ejemplos: ?cards=10&widths=640 | ?back=1&widths=640 | ?brand=1&widths=640',
       });
     }
 
@@ -1978,10 +2139,20 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'private, no-store');
 
     const back: Record<string, string> = {};
+    const brand: Record<string, string> = {};
 
     if (includeBack) {
       for (const width of uniqueWidths) {
         back[String(width)] = await createTarotBackSignedUrl(
+          width,
+          TAROT_CLIENT_SIGNED_URL_TTL_SECONDS
+        );
+      }
+    }
+
+    if (includeBrand) {
+      for (const width of uniqueWidths) {
+        brand[String(width)] = await createBrandMarkSignedUrl(
           width,
           TAROT_CLIENT_SIGNED_URL_TTL_SECONDS
         );
@@ -1996,6 +2167,7 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
       ).toISOString(),
       cards: result,
       back: includeBack ? back : undefined,
+      brand: includeBrand ? brand : undefined,
     });
   } catch (error: unknown) {
     console.error('Tarot client signed URLs error:', error);
@@ -2094,13 +2266,14 @@ app.post('/api/github/webhook', async (req: Request, res: Response) => {
 
     const cards = extractTarotNumbersFromGithubPush(req.body);
     const backChanged = githubPushChangedTarotBack(req.body);
+    const brandChanged = githubPushChangedBrandMark(req.body);
 
-    if (cards.length === 0 && !backChanged) {
+    if (cards.length === 0 && !backChanged && !brandChanged) {
       return res.status(200).json({
         ok: true,
         ignored: true,
         reason:
-          'El push no modificó cartas juli_XX ni dorso dentro de /tarot. ' +
+          'El push no modificó cartas juli_XX, dorso ni Signo-marcario dentro de /tarot. ' +
           'receipts/ no dispara sincronización.',
       });
     }
@@ -2111,6 +2284,7 @@ app.post('/api/github/webhook', async (req: Request, res: Response) => {
         : [];
 
     let backResult: any = null;
+    let brandResult: any = null;
 
     if (backChanged) {
       try {
@@ -2126,15 +2300,32 @@ app.post('/api/github/webhook', async (req: Request, res: Response) => {
       }
     }
 
+    if (brandChanged) {
+      try {
+        const files = await listTarotFiles(true);
+        brandResult = await syncBrandMarkToR2(files, true);
+      } catch (error: unknown) {
+        brandResult = {
+          asset: 'signo-marcario',
+          ok: false,
+          skipped: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
     const failed = results.filter((item) => !item.ok).length;
     const backFailed = backResult && !backResult.ok ? 1 : 0;
+    const brandFailed = brandResult && !brandResult.ok ? 1 : 0;
 
-    return res.status(failed + backFailed > 0 ? 207 : 200).json({
-      ok: failed === 0 && backFailed === 0,
+    return res.status(failed + backFailed + brandFailed > 0 ? 207 : 200).json({
+      ok: failed === 0 && backFailed === 0 && brandFailed === 0,
       event: 'push',
       cards,
       backChanged,
+      brandChanged,
       back: backResult,
+      brand: brandResult,
       failed,
       results,
     });
@@ -2540,6 +2731,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('GET  /api/tarot/urls [PRIVATE]');
   console.log('GET  /api/tarot/client-urls [BASE44 CLIENT]');
   console.log('Tarot dorso support: enabled (back=1)');
+  console.log('Signo marcario support: enabled (brand=1)');
   console.log('POST /api/tarot/sync [PRIVATE]');
   console.log('POST /api/github/webhook [SIGNED GITHUB]');
   console.log('POST /analyze-receipt [BASE44 CLIENT OR API_TOKEN]');
