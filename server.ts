@@ -1793,18 +1793,6 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
           ? body.cards
           : '';
 
-    const numbers = cardsValue
-      ? cardsValue
-          .split(',')
-          .map((value: string) => Number.parseInt(value.trim(), 10))
-          .filter((value: number) => Number.isInteger(value) && value > 0)
-      : files
-          .map((file) => {
-            const number = getTarotNumberFromFilename(file.name);
-            return number ?? NaN;
-          })
-          .filter((value) => Number.isInteger(value) && value > 0);
-
     const force =
       String(req.query.force || '') === '1' ||
       body.force === true ||
@@ -1820,7 +1808,27 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
       body.brand === true ||
       String(body.brand || '') === '1';
 
-    const results = await syncTarotNumbersToR2(numbers, force);
+    const specialAssetOnly =
+      !cardsValue && (backRequested || brandRequested);
+
+    const numbers = cardsValue
+      ? cardsValue
+          .split(',')
+          .map((value: string) => Number.parseInt(value.trim(), 10))
+          .filter((value: number) => Number.isInteger(value) && value > 0)
+      : specialAssetOnly
+        ? []
+        : files
+            .map((file) => {
+              const number = getTarotNumberFromFilename(file.name);
+              return number ?? NaN;
+            })
+            .filter((value) => Number.isInteger(value) && value > 0);
+
+    const results =
+      numbers.length > 0
+        ? await syncTarotNumbersToR2(numbers, force)
+        : [];
 
     let backResult: any = null;
     let brandResult: any = null;
