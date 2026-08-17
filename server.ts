@@ -583,6 +583,11 @@ function tarotR2Key(number: number, width: number | 'original'): string {
   return `tarot/${width}/${filename}`;
 }
 
+function tarotBackR2Key(width: number | 'original'): string {
+  if (width === 'original') return 'tarot/original/dorso.webp';
+  return `tarot/${width}/dorso.webp`;
+}
+
 async function r2HasSameSourceSha(key: string, sourceSha: string): Promise<boolean> {
   const { bucket } = r2Config();
 
@@ -678,7 +683,7 @@ async function putTarotVariantToR2(
 
   return key;
 }
-
+\nasync function putTarotBackVariantToR2(\n  width: number | 'original',\n  buffer: Buffer,\n  sourceSha: string\n): Promise<string> {\n  const { bucket } = r2Config();\n  const key = tarotBackR2Key(width);\n\n  await getR2Client().send(\n    new PutObjectCommand({\n      Bucket: bucket,\n      Key: key,\n      Body: buffer,\n      ContentType: 'image/webp',\n      CacheControl: 'private, max-age=600',\n      Metadata: { source_sha: sourceSha, asset: 'dorso', width: String(width) },\n    })\n  );\n\n  return key;\n}\n\nasync function fetchTarotBackBuffer(file: TarotFile): Promise<Buffer> {\n  const { owner, repo, branch, token } = ghConfig();\n  const url =\n    `https://api.github.com/repos/${encodeURIComponent(owner)}` +\n    `/${encodeURIComponent(repo)}/contents/tarot/${encodeURIComponent(file.name)}` +\n    `?ref=${encodeURIComponent(branch)}`;\n\n  const response = await fetch(url, {\n    headers: { ...githubHeaders(token), Accept: 'application/vnd.github.raw' },\n  });\n\n  if (!response.ok) {\n    const body = await response.text();\n    throw new Error(`No se pudo descargar ${file.name}: ${body}`);\n  }\n\n  return Buffer.from(await response.arrayBuffer());\n}\n\nasync function syncTarotBackToR2(files: TarotFile[], force = false) {\n  const file = findTarotBackFile(files);\n  if (!file) {\n    return {\n      asset: 'dorso', ok: false, skipped: false,\n      error: 'No se encontró dorso.jpg/png/webp dentro de GitHub /tarot.',\n    };\n  }\n\n  const probeKey = tarotBackR2Key(640);\n  if (!force && await r2HasSameSourceSha(probeKey, file.sha)) {\n    return { asset: 'dorso', ok: true, skipped: true, sourceName: file.name, sourceSha: file.sha };\n  }\n\n  const original = await fetchTarotBackBuffer(file);\n  const variants = await encodeTarotVariants(original);\n  const uploaded = [];\n  for (const variant of variants) {\n    const key = await putTarotBackVariantToR2(variant.width, variant.buffer, file.sha);\n    uploaded.push({ width: variant.width, key, bytes: variant.buffer.length });\n  }\n\n  return { asset: 'dorso', ok: true, skipped: false, sourceName: file.name, sourceSha: file.sha, variants: uploaded };\n}\n
 async function syncTarotCardToR2(
   number: number,
   files: TarotFile[],
@@ -782,7 +787,7 @@ async function createTarotSignedUrl(
     { expiresIn }
   );
 }
-
+\nasync function createTarotBackSignedUrl(\n  width: number | 'original',\n  expiresIn: number\n): Promise<string> {\n  const { bucket } = r2Config();\n  return getSignedUrl(\n    getR2Client(),\n    new GetObjectCommand({ Bucket: bucket, Key: tarotBackR2Key(width) }),\n    { expiresIn }\n  );\n}\n
 function verifyGithubWebhookSignature(req: Request): boolean {
   const secret = process.env.GITHUB_WEBHOOK_SECRET?.trim() || '';
   if (!secret) return false;
@@ -811,7 +816,7 @@ function verifyGithubWebhookSignature(req: Request): boolean {
   return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
-function extractTarotNumbersFromGithubPush(body: any): number[] {
+function githubPushChangedTarotBack(body: any): boolean {\n  const commits = Array.isArray(body?.commits) ? body.commits : [];\n  for (const commit of commits) {\n    for (const group of ['added', 'modified', 'removed']) {\n      const paths = Array.isArray(commit?.[group]) ? commit[group] : [];\n      for (const path of paths) {\n        if (typeof path !== 'string' || !/^tarot\\//i.test(path)) continue;\n        const filename = path.split('/').pop() || '';\n        if (isTarotBackFilename(filename)) return true;\n      }\n    }\n  }\n  return false;\n}\n\nfunction extractTarotNumbersFromGithubPush(body: any): number[] {
   const changedPaths = new Set<string>();
 
   const commits = Array.isArray(body?.commits) ? body.commits : [];
@@ -1126,6 +1131,14 @@ function findTarotFile(number: number, files: TarotFile[]): TarotFile | null {
     files.find((file) => getTarotNumberFromFilename(file.name) === number) ||
     null
   );
+}
+
+function isTarotBackFilename(filename: string): boolean {
+  return /^dorso(?:[\s_-].*)?\.(jpg|jpeg|png|webp)$/i.test(filename.trim());
+}
+
+function findTarotBackFile(files: TarotFile[]): TarotFile | null {
+  return files.find((file) => isTarotBackFilename(file.name)) || null;
 }
 
 async function fetchTarotOriginal(number: number, file: TarotFile) {
@@ -1521,7 +1534,22 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
       body.force === true ||
       String(body.force || '') === '1';
 
+    const backRequested =
+      String(req.query.back || '') === '1' ||
+      body.back === true ||
+      String(body.back || '') === '1' ||
+      !cardsValue;
+
     const results = await syncTarotNumbersToR2(numbers, force);
+
+    let backResult: any = null;
+    if (backRequested) {
+      try {
+        backResult = await syncTarotBackToR2(files, force);
+      } catch (error: unknown) {
+        backResult = { asset: 'dorso', ok: false, skipped: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
 
     const synced = results.filter(
       (item) => item.ok && !item.skipped
@@ -1535,12 +1563,15 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
       (item) => !item.ok
     ).length;
 
-    return res.status(failed > 0 ? 207 : 200).json({
-      ok: failed === 0,
+    const backFailed = backResult && !backResult.ok ? 1 : 0;
+
+    return res.status(failed + backFailed > 0 ? 207 : 200).json({
+      ok: failed === 0 && backFailed === 0,
       requested: [...new Set(numbers)].length,
       synced,
       skipped,
       failed,
+      back: backResult,
       results,
     });
   } catch (error: unknown) {
@@ -1565,11 +1596,12 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
       .filter((value) => Number.isInteger(value) && value > 0);
 
     const cards = [...new Set(requestedCards)];
+    const includeBack = String(req.query.back || '') === '1' || String(req.query.includeBack || '') === '1';
 
-    if (cards.length === 0) {
+    if (cards.length === 0 && !includeBack) {
       return res.status(400).json({
         ok: false,
-        error: 'cards es requerido. Ejemplo: ?cards=1,2,3&widths=320,640',
+        error: 'cards es requerido, salvo que uses back=1.',
       });
     }
 
@@ -1631,13 +1663,19 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
 
     res.setHeader('Cache-Control', 'private, no-store');
 
+    const back: Record<string, string> = {};
+    if (includeBack) {
+      for (const width of uniqueWidths) {
+        back[String(width)] = await createTarotBackSignedUrl(width, expiresIn);
+      }
+    }
+
     return res.status(200).json({
       ok: true,
       expiresIn,
-      expiresAt: new Date(
-        Date.now() + expiresIn * 1000
-      ).toISOString(),
+      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
       cards: result,
+      back: includeBack ? back : undefined,
     });
   } catch (error: unknown) {
     console.error('Tarot signed URLs error:', error);
@@ -1732,11 +1770,12 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
       );
 
     const cards = [...new Set(requestedCards)];
+    const includeBack = String(req.query.back || '') === '1' || String(req.query.includeBack || '') === '1';
 
-    if (cards.length === 0) {
+    if (cards.length === 0 && !includeBack) {
       return res.status(400).json({
         ok: false,
-        error: 'cards es requerido. Ejemplo: ?cards=10&widths=640',
+        error: 'cards es requerido, salvo que uses back=1.',
       });
     }
 
@@ -1795,13 +1834,19 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
 
     res.setHeader('Cache-Control', 'private, no-store');
 
+    const back: Record<string, string> = {};
+    if (includeBack) {
+      for (const width of uniqueWidths) {
+        back[String(width)] = await createTarotBackSignedUrl(width, TAROT_CLIENT_SIGNED_URL_TTL_SECONDS);
+      }
+    }
+
     return res.status(200).json({
       ok: true,
       expiresIn: TAROT_CLIENT_SIGNED_URL_TTL_SECONDS,
-      expiresAt: new Date(
-        Date.now() + TAROT_CLIENT_SIGNED_URL_TTL_SECONDS * 1000
-      ).toISOString(),
+      expiresAt: new Date(Date.now() + TAROT_CLIENT_SIGNED_URL_TTL_SECONDS * 1000).toISOString(),
       cards: result,
+      back: includeBack ? back : undefined,
     });
   } catch (error: unknown) {
     console.error('Tarot client signed URLs error:', error);
@@ -1837,6 +1882,8 @@ app.get('/api/tarot/manifest', auth, async (_req: Request, res: Response) => {
 
     res.setHeader('Cache-Control', 'private, no-store');
 
+    const backFile = findTarotBackFile(files);
+
     return res.status(200).json({
       ok: true,
       branch,
@@ -1844,6 +1891,7 @@ app.get('/api/tarot/manifest', auth, async (_req: Request, res: Response) => {
       sourceFolder: 'tarot',
       count: cards.length,
       variants: [...TAROT_R2_WIDTHS, 'original'],
+      back: backFile ? { name: backFile.name, sha: backFile.sha, size: backFile.size } : null,
       cards,
     });
   } catch (error: unknown) {
@@ -1899,23 +1947,36 @@ app.post('/api/github/webhook', async (req: Request, res: Response) => {
     }
 
     const cards = extractTarotNumbersFromGithubPush(req.body);
+    const backChanged = githubPushChangedTarotBack(req.body);
 
-    if (cards.length === 0) {
+    if (cards.length === 0 && !backChanged) {
       return res.status(200).json({
         ok: true,
         ignored: true,
-        reason:
-          'El push no modificó cartas juli_XX dentro de /tarot. receipts/ no dispara sincronización.',
+        reason: 'El push no modificó cartas juli_XX ni dorso dentro de /tarot. receipts/ no dispara sincronización.',
       });
     }
 
-    const results = await syncTarotNumbersToR2(cards, true);
-    const failed = results.filter((item) => !item.ok).length;
+    const results = cards.length > 0 ? await syncTarotNumbersToR2(cards, true) : [];
+    let backResult: any = null;
+    if (backChanged) {
+      try {
+        const files = await listTarotFiles(true);
+        backResult = await syncTarotBackToR2(files, true);
+      } catch (error: unknown) {
+        backResult = { asset: 'dorso', ok: false, skipped: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
 
-    return res.status(failed > 0 ? 207 : 200).json({
-      ok: failed === 0,
+    const failed = results.filter((item) => !item.ok).length;
+    const backFailed = backResult && !backResult.ok ? 1 : 0;
+
+    return res.status(failed + backFailed > 0 ? 207 : 200).json({
+      ok: failed === 0 && backFailed === 0,
       event: 'push',
       cards,
+      backChanged,
+      back: backResult,
       failed,
       results,
     });
@@ -2320,6 +2381,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('GET  /api/tarot/manifest [PRIVATE]');
   console.log('GET  /api/tarot/urls [PRIVATE]');
   console.log('GET  /api/tarot/client-urls [BASE44 CLIENT]');
+  console.log('Tarot dorso support: enabled (back=1)');
   console.log('POST /api/tarot/sync [PRIVATE]');
   console.log('POST /api/github/webhook [SIGNED GITHUB]');
   console.log('POST /analyze-receipt [BASE44 CLIENT OR API_TOKEN]');
