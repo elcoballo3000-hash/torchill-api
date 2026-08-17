@@ -445,8 +445,8 @@ const MAX_SIGNED_CARDS_PER_REQUEST = 24;
 const TAROT_CLIENT_SIGNED_URL_TTL_SECONDS = 5 * 60;
 const TAROT_CLIENT_MAX_CARDS_PER_REQUEST = 12;
 const TAROT_CLIENT_RATE_LIMIT_PER_MINUTE = 30;
-const TAROT_CLIENT_MIN_CARD = 1;
-const TAROT_CLIENT_MAX_CARD = 78;
+const TAROT_CLIENT_MIN_CARD = 3;
+const TAROT_CLIENT_MAX_CARD = 80;
 
 interface ClientRateLimitEntry {
   count: number;
@@ -1657,7 +1657,7 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
 // Seguridad aplicada:
 // - Origin permitido configurado en TAROT_CLIENT_ORIGINS.
 // - Máximo 12 cartas por request.
-// - Solamente cartas 1..78.
+// - Solamente cartas 3..80.
 // - Solamente 320/640/960/1280 (nunca "original").
 // - URLs R2 firmadas por 5 minutos.
 // - Rate limit por IP.
