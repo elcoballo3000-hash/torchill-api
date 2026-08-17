@@ -365,6 +365,93 @@ const TAROT_R2_WIDTHS = [320, 640, 960, 1280] as const;
 const TAROT_SIGNED_URL_TTL_SECONDS = 10 * 60;
 const MAX_SIGNED_CARDS_PER_REQUEST = 24;
 
+// Endpoint público-controlado para el frontend de Base44.
+// No usa API_TOKEN en el navegador.
+const TAROT_CLIENT_SIGNED_URL_TTL_SECONDS = 5 * 60;
+const TAROT_CLIENT_MAX_CARDS_PER_REQUEST = 12;
+const TAROT_CLIENT_RATE_LIMIT_PER_MINUTE = 30;
+const TAROT_CLIENT_MIN_CARD = 1;
+const TAROT_CLIENT_MAX_CARD = 78;
+
+interface ClientRateLimitEntry {
+  count: number;
+  resetAt: number;
+}
+
+const tarotClientRateLimit = new Map<string, ClientRateLimitEntry>();
+
+function getTarotClientAllowedOrigins(): string[] {
+  return String(process.env.TAROT_CLIENT_ORIGINS || '')
+    .split(',')
+    .map((value) => value.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+}
+
+function isTarotClientOriginAllowed(origin: string): boolean {
+  const normalized = origin.trim().replace(/\/+$/, '');
+  if (!normalized) return false;
+
+  const allowedOrigins = getTarotClientAllowedOrigins();
+
+  // Por seguridad el endpoint queda deshabilitado hasta configurar
+  // TAROT_CLIENT_ORIGINS en Render.
+  if (allowedOrigins.length === 0) return false;
+
+  return allowedOrigins.includes(normalized);
+}
+
+function getTarotClientIp(req: Request): string {
+  const forwarded = String(req.headers['x-forwarded-for'] || '')
+    .split(',')[0]
+    .trim();
+
+  return forwarded || req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function consumeTarotClientRateLimit(req: Request): {
+  allowed: boolean;
+  remaining: number;
+  resetAt: number;
+} {
+  const ip = getTarotClientIp(req);
+  const now = Date.now();
+  const windowMs = 60_000;
+
+  const current = tarotClientRateLimit.get(ip);
+
+  if (!current || current.resetAt <= now) {
+    const entry = {
+      count: 1,
+      resetAt: now + windowMs,
+    };
+    tarotClientRateLimit.set(ip, entry);
+
+    return {
+      allowed: true,
+      remaining: TAROT_CLIENT_RATE_LIMIT_PER_MINUTE - 1,
+      resetAt: entry.resetAt,
+    };
+  }
+
+  current.count += 1;
+
+  // Limpieza liviana para que el Map no crezca indefinidamente.
+  if (tarotClientRateLimit.size > 5000) {
+    for (const [key, value] of tarotClientRateLimit.entries()) {
+      if (value.resetAt <= now) tarotClientRateLimit.delete(key);
+    }
+  }
+
+  return {
+    allowed: current.count <= TAROT_CLIENT_RATE_LIMIT_PER_MINUTE,
+    remaining: Math.max(
+      0,
+      TAROT_CLIENT_RATE_LIMIT_PER_MINUTE - current.count
+    ),
+    resetAt: current.resetAt,
+  };
+}
+
 interface R2Config {
   accountId: string;
   accessKeyId: string;
@@ -1487,6 +1574,170 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
   }
 });
 
+
+// ================================================================
+// FRONTEND BASE44 SIN BACKEND FUNCTIONS / SIN INTEGRATION CREDITS
+//
+// Este endpoint NO recibe API_TOKEN desde el navegador.
+// Seguridad aplicada:
+// - Origin permitido configurado en TAROT_CLIENT_ORIGINS.
+// - Máximo 12 cartas por request.
+// - Solamente cartas 1..78.
+// - Solamente 320/640/960/1280 (nunca "original").
+// - URLs R2 firmadas por 5 minutos.
+// - Rate limit por IP.
+// - Solo lectura; no lista/escribe/borra objetos.
+//
+// IMPORTANTE:
+// CORS ayuda a limitar el uso desde navegadores, pero no convierte
+// este endpoint en autenticación fuerte. Una persona técnicamente
+// avanzada podría imitar un Origin fuera del navegador. Por eso
+// también existen límites, expiración corta y un alcance mínimo.
+// ================================================================
+app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
+  try {
+    r2Config();
+
+    const origin = String(req.headers.origin || '').trim();
+    const allowedOrigins = getTarotClientAllowedOrigins();
+
+    if (allowedOrigins.length === 0) {
+      return res.status(503).json({
+        ok: false,
+        error:
+          'TAROT_CLIENT_ORIGINS no está configurado en Render. ' +
+          'Agregá la URL exacta de tu app Base44.',
+      });
+    }
+
+    if (!origin || !isTarotClientOriginAllowed(origin)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Origen no permitido.',
+      });
+    }
+
+    // Sobrescribe el CORS global "*" específicamente para esta ruta.
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    const limit = consumeTarotClientRateLimit(req);
+    res.setHeader(
+      'X-RateLimit-Limit',
+      String(TAROT_CLIENT_RATE_LIMIT_PER_MINUTE)
+    );
+    res.setHeader('X-RateLimit-Remaining', String(limit.remaining));
+    res.setHeader(
+      'X-RateLimit-Reset',
+      String(Math.ceil(limit.resetAt / 1000))
+    );
+
+    if (!limit.allowed) {
+      res.setHeader(
+        'Retry-After',
+        String(Math.max(1, Math.ceil((limit.resetAt - Date.now()) / 1000)))
+      );
+
+      return res.status(429).json({
+        ok: false,
+        error: 'Demasiadas solicitudes. Reintentá en unos segundos.',
+      });
+    }
+
+    const requestedCards = String(req.query.cards || '')
+      .split(',')
+      .map((value: string) => Number.parseInt(value.trim(), 10))
+      .filter(
+        (value: number) =>
+          Number.isInteger(value) &&
+          value >= TAROT_CLIENT_MIN_CARD &&
+          value <= TAROT_CLIENT_MAX_CARD
+      );
+
+    const cards = [...new Set(requestedCards)];
+
+    if (cards.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'cards es requerido. Ejemplo: ?cards=10&widths=640',
+      });
+    }
+
+    if (cards.length > TAROT_CLIENT_MAX_CARDS_PER_REQUEST) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          `Máximo ${TAROT_CLIENT_MAX_CARDS_PER_REQUEST} cartas ` +
+          'por solicitud desde el frontend.',
+      });
+    }
+
+    const widthTokens = String(req.query.widths || '320,640')
+      .split(',')
+      .map((value: string) => value.trim())
+      .filter(Boolean);
+
+    const widths: number[] = [];
+
+    for (const token of widthTokens) {
+      // "original" queda expresamente prohibido en el endpoint cliente.
+      if (token.toLowerCase() === 'original') continue;
+
+      const width = Number.parseInt(token, 10);
+
+      if ((TAROT_R2_WIDTHS as readonly number[]).includes(width)) {
+        widths.push(width);
+      }
+    }
+
+    const uniqueWidths = [...new Set(widths)];
+
+    if (uniqueWidths.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          'widths inválido. Desde el frontend solo se permiten ' +
+          '320,640,960,1280.',
+      });
+    }
+
+    const result: Record<string, Record<string, string>> = {};
+
+    for (const card of cards) {
+      result[String(card)] = {};
+
+      for (const width of uniqueWidths) {
+        result[String(card)][String(width)] =
+          await createTarotSignedUrl(
+            card,
+            width,
+            TAROT_CLIENT_SIGNED_URL_TTL_SECONDS
+          );
+      }
+    }
+
+    res.setHeader('Cache-Control', 'private, no-store');
+
+    return res.status(200).json({
+      ok: true,
+      expiresIn: TAROT_CLIENT_SIGNED_URL_TTL_SECONDS,
+      expiresAt: new Date(
+        Date.now() + TAROT_CLIENT_SIGNED_URL_TTL_SECONDS * 1000
+      ).toISOString(),
+      cards: result,
+    });
+  } catch (error: unknown) {
+    console.error('Tarot client signed URLs error:', error);
+
+    return res.status(500).json({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
 app.get('/api/tarot/manifest', auth, async (_req: Request, res: Response) => {
   try {
     const { branch } = ghConfig();
@@ -1973,6 +2224,13 @@ app.listen(PORT, '0.0.0.0', () => {
     )}`
   );
   console.log(`R2 bucket: ${process.env.R2_BUCKET || 'NO CONFIGURADO'}`);
+  console.log(
+    `Tarot client origins: ${
+      getTarotClientAllowedOrigins().length > 0
+        ? getTarotClientAllowedOrigins().join(', ')
+        : 'NO CONFIGURADO'
+    }`
+  );
   console.log('Tarot filename pattern: tarot juli-N.ext');
   console.log('PDF modes: auto | image | native');
   console.log('--------------------------------------');
@@ -1986,6 +2244,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('GET  /tarot-manifest [PRIVATE]');
   console.log('GET  /api/tarot/manifest [PRIVATE]');
   console.log('GET  /api/tarot/urls [PRIVATE]');
+  console.log('GET  /api/tarot/client-urls [BASE44 CLIENT]');
   console.log('POST /api/tarot/sync [PRIVATE]');
   console.log('POST /api/github/webhook [SIGNED GITHUB]');
   console.log('POST /analyze-receipt');
