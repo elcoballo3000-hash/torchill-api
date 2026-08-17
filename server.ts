@@ -227,6 +227,81 @@ function auth(req: Request, res: Response, next: NextFunction) {
   return next();
 }
 
+
+interface AppClientRateLimitEntry {
+  count: number;
+  resetAt: number;
+}
+
+const appClientRateLimit = new Map<string, AppClientRateLimitEntry>();
+const APP_CLIENT_RATE_LIMIT_PER_MINUTE = 40;
+
+function getAppClientOrigin(req: Request): string {
+  return String(req.headers.origin || '').trim().replace(/\/+$/, '');
+}
+
+function getAppClientIp(req: Request): string {
+  const forwarded = String(req.headers['x-forwarded-for'] || '')
+    .split(',')[0]
+    .trim();
+
+  return forwarded || req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function consumeAppClientRateLimit(req: Request): boolean {
+  const ip = getAppClientIp(req);
+  const now = Date.now();
+  const current = appClientRateLimit.get(ip);
+
+  if (!current || current.resetAt <= now) {
+    appClientRateLimit.set(ip, {
+      count: 1,
+      resetAt: now + 60_000,
+    });
+    return true;
+  }
+
+  current.count += 1;
+
+  if (appClientRateLimit.size > 5000) {
+    for (const [key, value] of appClientRateLimit.entries()) {
+      if (value.resetAt <= now) appClientRateLimit.delete(key);
+    }
+  }
+
+  return current.count <= APP_CLIENT_RATE_LIMIT_PER_MINUTE;
+}
+
+function appClientOrAuth(req: Request, res: Response, next: NextFunction) {
+  const sent =
+    req.headers['x-api-key'] ||
+    (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+
+  if (API_TOKEN && sent === API_TOKEN) {
+    return next();
+  }
+
+  const origin = getAppClientOrigin(req);
+
+  if (!origin || !isTarotClientOriginAllowed(origin)) {
+    return res.status(401).json({
+      error: 'no autorizado',
+      details: 'Origen cliente no permitido.',
+    });
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+
+  if (!consumeAppClientRateLimit(req)) {
+    return res.status(429).json({
+      error: 'Demasiadas solicitudes. Reintentá en unos segundos.',
+    });
+  }
+
+  return next();
+}
+
 function getParamString(value: unknown): string {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return String(value[0] || '');
@@ -1144,7 +1219,7 @@ app.get('/api/gemini/project-copy', (_req: Request, res: Response) => {
    UPLOAD
    ========================================================= */
 
-app.post('/upload', auth, upload.single('file'), async (req: Request, res: Response) => {
+app.post('/upload', appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
   try {
     const uploadedFile = (req as any).file as { buffer?: Buffer; originalname?: string; mimetype?: string } | undefined;
     let buffer: Buffer | null = uploadedFile?.buffer || null;
@@ -1858,7 +1933,7 @@ app.post('/api/github/webhook', async (req: Request, res: Response) => {
    GEMINI PROJECT COPY
    ========================================================= */
 
-app.post('/api/gemini/project-copy', async (req: Request, res: Response) => {
+app.post('/api/gemini/project-copy', appClientOrAuth, async (req: Request, res: Response) => {
   try {
     if (apiKeys.length === 0) {
       return res.status(503).json({ error: 'El servicio Gemini no está configurado.' });
@@ -2017,7 +2092,7 @@ Devuelve exclusivamente JSON válido con esta estructura:
    GENERATE TEXT
    ========================================================= */
 
-app.post('/generate-text', auth, async (req: Request, res: Response) => {
+app.post('/generate-text', appClientOrAuth, async (req: Request, res: Response) => {
   try {
     if (apiKeys.length === 0) {
       return res.status(503).json({ error: 'El servicio Gemini no está configurado.' });
@@ -2071,7 +2146,7 @@ app.post('/generate-text', auth, async (req: Request, res: Response) => {
    - native: manda el PDF original directamente.
    ========================================================= */
 
-app.post('/analyze-receipt', auth, async (req: Request, res: Response) => {
+app.post('/analyze-receipt', appClientOrAuth, async (req: Request, res: Response) => {
   try {
     if (apiKeys.length === 0) {
       return res.status(503).json({ error: 'El servicio Gemini no está configurado.' });
@@ -2236,8 +2311,8 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('--------------------------------------');
   console.log('GET  /health');
   console.log('GET  /api/gemini/project-copy');
-  console.log('POST /api/gemini/project-copy');
-  console.log('POST /upload');
+  console.log('POST /api/gemini/project-copy [BASE44 CLIENT OR API_TOKEN]');
+  console.log('POST /upload [BASE44 CLIENT OR API_TOKEN]');
   console.log('GET  /receipt/:pathB64');
   console.log('GET  /tarot/:n');
   console.log('GET  /tarot/:w/:n');
@@ -2247,7 +2322,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('GET  /api/tarot/client-urls [BASE44 CLIENT]');
   console.log('POST /api/tarot/sync [PRIVATE]');
   console.log('POST /api/github/webhook [SIGNED GITHUB]');
-  console.log('POST /analyze-receipt');
-  console.log('POST /generate-text');
+  console.log('POST /analyze-receipt [BASE44 CLIENT OR API_TOKEN]');
+  console.log('POST /generate-text [BASE44 CLIENT OR API_TOKEN]');
   console.log('======================================');
 });
