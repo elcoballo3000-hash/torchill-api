@@ -2679,7 +2679,317 @@ IMPORTANTE:
 /* =========================================================
    404 / ERROR HANDLER
    ========================================================= */
+/* =========================================================
+   MÓDULO ARMARIO Y OUTFITS (/ropa/*)
+   ========================================================= */
 
+// Helper para leer o inicializar armario.json en GitHub
+async function getArmarioCatalog(): Promise<{ sha: string | null; items: any[] }> {
+  try {
+    const file = await getGithubFile('ropa/armario.json');
+    if (!file || !file.content) {
+      return { sha: null, items: [] };
+    }
+    const rawContent = Buffer.from(file.content, 'base64').toString('utf8');
+    const items = JSON.parse(rawContent);
+    return { sha: file.sha || null, items: Array.isArray(items) ? items : [] };
+  } catch (error) {
+    console.warn('armario.json no encontrado o vacío, inicializando array nuevo.');
+    return { sha: null, items: [] };
+  }
+}
+
+// 1. OBTENER CATÁLOGO DEL ARMARIO
+app.get('/ropa/armario', appClientOrAuth, async (_req: Request, res: Response) => {
+  try {
+    const { items } = await getArmarioCatalog();
+    return res.status(200).json({ ok: true, items });
+  } catch (error: unknown) {
+    console.error('Error obteniendo armario:', error);
+    return res.status(500).json({
+      error: 'No se pudo obtener el armario.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+// 2. SUBIR Y AUTOCLASIFICAR PRENDA
+app.post('/ropa/prenda', appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    const uploadedFile = (req as any).file as { buffer?: Buffer; originalname?: string; mimetype?: string } | undefined;
+    let buffer: Buffer | null = uploadedFile?.buffer || null;
+    let mimeType = uploadedFile?.mimetype || 'image/jpeg';
+    const body = getRequestBody(req);
+
+    if (!buffer) {
+      const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : (typeof body.base64 === 'string' ? body.base64 : '');
+      if (dataBase64) {
+        const clean = dataBase64.replace(/^data:[^;]+;base64,/i, '');
+        buffer = Buffer.from(clean, 'base64');
+        mimeType = typeof body.mimeType === 'string' ? body.mimeType : 'image/jpeg';
+      }
+    }
+
+    if (!buffer) {
+      return res.status(400).json({ error: 'Falta la imagen de la prenda.' });
+    }
+
+    // A. Catalogar con Gemini Vision
+    const base64Image = buffer.toString('base64');
+    const visionPrompt = `
+Analiza la prenda de vestir de la imagen y clasifícala estrictamente.
+Devuelve exclusivamente un JSON válido con esta estructura:
+{
+  "categoria": "superior" | "inferior" | "calzado" | "abrigo" | "accesorio",
+  "tipo": "nombre de la prenda (ej: remera lisa, cargo beige, borcegos, buzo oversize)",
+  "color": "color principal",
+  "estilo": "urbano / casual / deportivo / formal",
+  "estacion": "verano / invierno / media estacion"
+}
+`;
+
+    let metadata: any = {
+      categoria: 'superior',
+      tipo: 'prenda',
+      color: 'indefinido',
+      estilo: 'casual',
+      estacion: 'media estacion',
+    };
+
+    try {
+      const geminiRes: any = await runGemini<any>((ai) =>
+        ai.models.generateContent({
+          model: modelName,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: visionPrompt },
+                { inlineData: { mimeType, data: base64Image } },
+              ],
+            },
+          ],
+          config: { responseMimeType: 'application/json', temperature: 0.2 },
+        })
+      );
+      const text = geminiRes.text?.trim() || '';
+      if (text) metadata = parseGeminiJson(text);
+    } catch (aiError) {
+      console.warn('Gemini falló al clasificar prenda, usando valores default:', aiError);
+    }
+
+    // B. Subir imagen a GitHub (ropa/prendas/)
+    const id = `item_${Date.now()}`;
+    const filename = `${id}.jpg`;
+    const imagePath = `ropa/prendas/${filename}`;
+    const uploadResult = await uploadToGithub(imagePath, buffer);
+
+    const newItem = {
+      id,
+      path: imagePath,
+      sha: uploadResult.sha,
+      url: `https://raw.githubusercontent.com/${uploadResult.owner}/${uploadResult.repo}/${uploadResult.branch}/${imagePath}`,
+      categoria: metadata.categoria || 'superior',
+      tipo: metadata.tipo || 'prenda',
+      color: metadata.color || 'indefinido',
+      estilo: metadata.estilo || 'casual',
+      estacion: metadata.estacion || 'media estacion',
+      estado: 'limpio',
+      fechaCreacion: new Date().toISOString(),
+    };
+
+    // C. Actualizar armario.json en GitHub
+    const { items } = await getArmarioCatalog();
+    items.push(newItem);
+
+    const catalogBuffer = Buffer.from(JSON.stringify(items, null, 2), 'utf8');
+    await uploadToGithub('ropa/armario.json', catalogBuffer);
+
+    return res.status(200).json({ ok: true, item: newItem });
+  } catch (error: unknown) {
+    console.error('Error subiendo prenda:', error);
+    return res.status(500).json({
+      error: 'No se pudo guardar la prenda.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+// 3. ELIMINAR PRENDA (Físico en GitHub + Lógico en JSON)
+app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Response) => {
+  try {
+    const id = getParamString(req.params.id);
+    const { items } = await getArmarioCatalog();
+    const itemIndex = items.findIndex((it) => it.id === id);
+
+    if (itemIndex === -1) {
+      return res.status(404).json({ error: 'Prenda no encontrada.' });
+    }
+
+    const item = items[itemIndex];
+    const { owner, repo, branch, token } = ghConfig();
+
+    // Borrar imagen física de GitHub si tiene path y sha
+    try {
+      let sha = item.sha;
+      if (!sha) {
+        const file = await getGithubFile(item.path);
+        sha = file?.sha;
+      }
+      if (sha) {
+        const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodePathForGithub(item.path)}`;
+        await fetch(url, {
+          method: 'DELETE',
+          headers: githubHeaders(token),
+          body: JSON.stringify({
+            message: `Delete garment: ${item.path}`,
+            sha,
+            branch,
+          }),
+        });
+      }
+    } catch (delError) {
+      console.warn('Aviso: no se pudo borrar imagen física en GitHub:', delError);
+    }
+
+    // Quitar del array y commitear armario.json
+    items.splice(itemIndex, 1);
+    const catalogBuffer = Buffer.from(JSON.stringify(items, null, 2), 'utf8');
+    await uploadToGithub('ropa/armario.json', catalogBuffer);
+
+    return res.status(200).json({ ok: true, message: 'Prenda eliminada.' });
+  } catch (error: unknown) {
+    console.error('Error eliminando prenda:', error);
+    return res.status(500).json({
+      error: 'Error eliminando prenda.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+// 4. SUBIR FOTO DEL AVATAR (ropa/perfil/avatar.jpg)
+app.post('/ropa/avatar', appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    const uploadedFile = (req as any).file as { buffer?: Buffer } | undefined;
+    let buffer: Buffer | null = uploadedFile?.buffer || null;
+    const body = getRequestBody(req);
+
+    if (!buffer) {
+      const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : (typeof body.base64 === 'string' ? body.base64 : '');
+      if (dataBase64) {
+        const clean = dataBase64.replace(/^data:[^;]+;base64,/i, '');
+        buffer = Buffer.from(clean, 'base64');
+      }
+    }
+
+    if (!buffer) {
+      return res.status(400).json({ error: 'Falta la imagen del avatar.' });
+    }
+
+    const result = await uploadToGithub('ropa/perfil/avatar.jpg', buffer);
+    return res.status(200).json({
+      ok: true,
+      url: `https://raw.githubusercontent.com/${result.owner}/${result.repo}/${result.branch}/ropa/perfil/avatar.jpg`,
+    });
+  } catch (error: unknown) {
+    console.error('Error subiendo avatar:', error);
+    return res.status(500).json({
+      error: 'Error subiendo el avatar.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+// 5. CAMBIAR ESTADO DE PRENDAS (Lavar / Usar)
+app.post('/ropa/estado', appClientOrAuth, async (req: Request, res: Response) => {
+  try {
+    const body = getRequestBody(req);
+    const ids: string[] = Array.isArray(body.ids) ? body.ids : (body.id ? [body.id] : []);
+    const nuevoEstado: 'limpio' | 'usado' = body.estado === 'usado' ? 'usado' : 'limpio';
+    const resetAll = body.resetAll === true;
+
+    const { items } = await getArmarioCatalog();
+
+    items.forEach((item) => {
+      if (resetAll || ids.includes(item.id)) {
+        item.estado = nuevoEstado;
+      }
+    });
+
+    const catalogBuffer = Buffer.from(JSON.stringify(items, null, 2), 'utf8');
+    await uploadToGithub('ropa/armario.json', catalogBuffer);
+
+    return res.status(200).json({ ok: true, items });
+  } catch (error: unknown) {
+    console.error('Error actualizando estado:', error);
+    return res.status(500).json({
+      error: 'Error actualizando estado.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+// 6. GENERAR OUTFIT CON GEMINI + CLIMA DE LA PLATA
+app.post('/ropa/outfit', appClientOrAuth, async (req: Request, res: Response) => {
+  try {
+    const body = getRequestBody(req);
+    const ocasion = typeof body.ocasion === 'string' ? body.ocasion : 'Facultad / Taller';
+    const temporalidad = body.dia === 'manana' ? 'mañana' : 'hoy';
+
+    const { items } = await getArmarioCatalog();
+    const prendasLimpias = items.filter((it) => it.estado === 'limpio');
+
+    if (prendasLimpias.length === 0) {
+      return res.status(400).json({
+        error: 'No hay prendas limpias disponibles en el armario.',
+      });
+    }
+
+    const prompt = `
+Actúa como un estilista de moda profesional y personal.
+Tu tarea es armar el mejor outfit para ${temporalidad} para la ocasión: "${ocasion}".
+Ubicación geográfica: La Plata, Buenos Aires, Argentina.
+
+Teniendo en cuenta el clima estimado actual o típico de la temporada en La Plata, selecciona la combinación más armoniosa (colores, proporciones y abrigo adecuado) utilizando EXCLUSIVAMENTE prendas de este inventario disponible:
+
+${JSON.stringify(prendasLimpias, null, 2)}
+
+Devuelve ÚNICAMENTE un JSON válido con esta estructura:
+{
+  "climaResumen": "Breve estimación del clima considerado para La Plata (ej: Templado 20°C, soleado)",
+  "prendasElegidasIds": ["id_prenda_1", "id_prenda_2", "..."],
+  "explicacion": "Explicación de por qué combinan bien los colores, texturas y si abriga lo justo para el día"
+}
+`;
+
+    const geminiRes: any = await runGemini<any>((ai) =>
+      ai.models.generateContent({
+        model: modelName,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: { responseMimeType: 'application/json', temperature: 0.3 },
+      })
+    );
+
+    const text = geminiRes.text?.trim() || '';
+    if (!text) throw new Error('Gemini devolvió respuesta vacía.');
+
+    const parsed = parseGeminiJson(text);
+    const prendasSeleccionadas = items.filter((it) => parsed.prendasElegidasIds?.includes(it.id));
+
+    return res.status(200).json({
+      ok: true,
+      clima: parsed.climaResumen,
+      explicacion: parsed.explicacion,
+      prendas: prendasSeleccionadas,
+    });
+  } catch (error: unknown) {
+    console.error('Error generando outfit:', error);
+    return res.status(500).json({
+      error: 'Error generando outfit.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
 app.use((_req: Request, res: Response) => {
   return res.status(404).json({ error: 'Endpoint no encontrado.' });
 });
