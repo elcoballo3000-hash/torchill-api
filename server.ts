@@ -2564,124 +2564,6 @@ app.post('/generate-text', appClientOrAuth, async (req: Request, res: Response) 
    - native: manda el PDF original directamente.
    ========================================================= */
 
-app.post('/analyze-receipt', appClientOrAuth, async (req: Request, res: Response) => {
-  try {
-    if (apiKeys.length === 0) {
-      return res.status(503).json({ error: 'El servicio Gemini no está configurado.' });
-    }
-
-    const body = getRequestBody(req);
-    const fileUrl = typeof body.fileUrl === 'string' ? body.fileUrl.trim() : '';
-    const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
-    const requestedPdfMode = typeof body.pdfMode === 'string' ? body.pdfMode.toLowerCase() : 'auto';
-    const pdfMode = ['auto', 'image', 'native'].includes(requestedPdfMode)
-      ? requestedPdfMode
-      : 'auto';
-
-    if (!fileUrl) return res.status(400).json({ error: 'fileUrl es requerido.' });
-    if (!prompt) return res.status(400).json({ error: 'prompt es requerido.' });
-
-    const downloaded = await downloadReceipt(fileUrl);
-    let dataBuffer = downloaded.buffer;
-    let mimeType = downloaded.mimeType;
-    let pdfProcessing: 'not-pdf' | 'native' | 'image' | 'native-fallback' = 'not-pdf';
-
-    const isPdf =
-      mimeType === 'application/pdf' ||
-      fileUrl.toLowerCase().split('?')[0].endsWith('.pdf');
-
-    console.log(
-      `Receipt: archivo descargado (${downloaded.buffer.length} bytes, ${downloaded.mimeType}, pdfMode=${pdfMode})`
-    );
-
-    if (isPdf) {
-      if (pdfMode === 'native') {
-        pdfProcessing = 'native';
-        console.log('Receipt PDF: envío nativo a Gemini.');
-      } else {
-        const png = await pdfFirstPageToPngSafe(downloaded.buffer);
-        if (png) {
-          dataBuffer = png;
-          mimeType = 'image/png';
-          pdfProcessing = 'image';
-          console.log('Receipt PDF: usando primera página convertida a PNG.');
-        } else {
-          dataBuffer = downloaded.buffer;
-          mimeType = 'application/pdf';
-          pdfProcessing = 'native-fallback';
-          console.warn('Receipt PDF: conversión falló; usando PDF original en Gemini.');
-        }
-      }
-    }
-
-    const base64 = dataBuffer.toString('base64');
-    const geminiPrompt = `
-${prompt}
-
-IMPORTANTE:
-- Analiza cuidadosamente el comprobante.
-- Extrae únicamente información visible o claramente inferible.
-- No inventes datos.
-- Si un campo no puede determinarse, utiliza null.
-- Devuelve ÚNICAMENTE JSON válido.
-`;
-
-    const response: any = await runGemini<any>((ai) =>
-      ai.models.generateContent({
-        model: modelName,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: geminiPrompt },
-              { inlineData: { mimeType, data: base64 } },
-            ],
-          },
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-      })
-    );
-
-    const text = response.text?.trim() || '';
-    if (!text) throw new Error('Gemini devolvió una respuesta vacía.');
-
-    const parsed = parseGeminiJson(text);
-    return res.status(200).json({
-      ok: true,
-      detected: parsed,
-      raw: text,
-      inputMimeType: downloaded.mimeType,
-      sentMimeType: mimeType,
-      pdfMode,
-      pdfProcessing,
-    });
-  } catch (error: unknown) {
-    console.error('Analyze receipt error:', error);
-
-    if (isRateLimitError(error)) {
-      return res.status(429).json({
-        error: 'Todas las API keys de Gemini están temporalmente limitadas.',
-        retryable: true,
-      });
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-    return res.status(500).json({
-      error: 'Error analizando el comprobante.',
-      details: message,
-    });
-  }
-});
-
-/* =========================================================
-   404 / ERROR HANDLER
-   ========================================================= */
-/* =========================================================
-   MÓDULO ARMARIO Y OUTFITS (/ropa/*)
-   ========================================================= */
 /* =========================================================
    MÓDULO ARMARIO Y OUTFITS CON CLOUDFLARE R2 (/ropa/*)
    ========================================================= */
@@ -2768,13 +2650,12 @@ function extractFileBuffer(req: Request): Buffer | null {
   return null;
 }
 
-// 1. OBTENER CATÁLOGO DEL ARMARIO (Con URLs firmadas de R2 listas para el frontend)
+// 1. OBTENER CATÁLOGO DEL ARMARIO (Con URLs firmadas de R2)
 app.get('/ropa/armario', appClientOrAuth, async (_req: Request, res: Response) => {
   try {
     r2Config();
     const { items } = await getArmarioCatalog();
 
-    // Generar URLs firmadas frescas para cada prenda
     const itemsConUrls = await Promise.all(
       items.map(async (item) => {
         let displayUrl = item.url;
@@ -2789,7 +2670,6 @@ app.get('/ropa/armario', appClientOrAuth, async (_req: Request, res: Response) =
       })
     );
 
-    // Comprobar si existe foto de avatar en R2
     let avatarUrl: string | null = null;
     try {
       avatarUrl = await createR2SignedUrl('ropa/avatar/avatar.webp');
@@ -2819,11 +2699,9 @@ app.post('/ropa/prenda', appClientOrAuth, upload.single('file'), async (req: Req
       return res.status(400).json({ error: 'Falta la imagen de la prenda.' });
     }
 
-    // A. Normalizar cualquier formato a WebP
     const webpBuffer = await convertBufferToWebp(rawBuffer);
     const base64Image = webpBuffer.toString('base64');
 
-    // B. Clasificación automática con Gemini Vision
     const visionPrompt = `
 Analiza la prenda de vestir de la imagen y clasifícala estrictamente.
 Devuelve exclusivamente un JSON válido con esta estructura:
@@ -2866,13 +2744,11 @@ Devuelve exclusivamente un JSON válido con esta estructura:
       console.warn('Gemini falló al clasificar prenda, usando valores default:', aiError);
     }
 
-    // C. Guardar en Cloudflare R2
     const id = `item_${Date.now()}`;
     const r2Key = `ropa/prendas/${id}.webp`;
     await putR2GarmentObject(r2Key, webpBuffer);
     const signedUrl = await createR2SignedUrl(r2Key);
 
-    // D. Registrar en armario.json en GitHub
     const newItem = {
       id,
       r2Key,
@@ -2904,7 +2780,7 @@ Devuelve exclusivamente un JSON válido con esta estructura:
   }
 });
 
-// 3. ELIMINAR PRENDA (Borra de R2 y del catálogo en GitHub)
+// 3. ELIMINAR PRENDA
 app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Response) => {
   try {
     const id = getParamString(req.params.id);
@@ -2917,7 +2793,6 @@ app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Respon
 
     const item = items[itemIndex];
 
-    // A. Eliminar de R2 si tiene r2Key
     if (item.r2Key) {
       try {
         const { bucket } = r2Config();
@@ -2933,7 +2808,6 @@ app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Respon
       }
     }
 
-    // B. Actualizar JSON en GitHub
     items.splice(itemIndex, 1);
     const catalogBuffer = Buffer.from(JSON.stringify(items, null, 2), 'utf8');
     await uploadToGithub('ropa/armario.json', catalogBuffer);
@@ -3051,7 +2925,6 @@ Devuelve ÚNICAMENTE un JSON válido con esta estructura:
 
     const parsed = parseGeminiJson(text);
 
-    // Adjuntar URLs firmadas a las prendas elegidas para que se vean en pantalla
     const prendasSeleccionadas = await Promise.all(
       items
         .filter((it) => parsed.prendasElegidasIds?.includes(it.id))
@@ -3080,313 +2953,11 @@ Devuelve ÚNICAMENTE un JSON válido con esta estructura:
     });
   }
 });
-// Helper para leer o inicializar armario.json en GitHub
-async function getArmarioCatalog(): Promise<{ sha: string | null; items: any[] }> {
-  try {
-    const file = await getGithubFile('ropa/armario.json');
-    if (!file || !file.content) {
-      return { sha: null, items: [] };
-    }
-    const rawContent = Buffer.from(file.content, 'base64').toString('utf8');
-    const items = JSON.parse(rawContent);
-    return { sha: file.sha || null, items: Array.isArray(items) ? items : [] };
-  } catch (error) {
-    console.warn('armario.json no encontrado o vacío, inicializando array nuevo.');
-    return { sha: null, items: [] };
-  }
-}
 
-// 1. OBTENER CATÁLOGO DEL ARMARIO
-app.get('/ropa/armario', appClientOrAuth, async (_req: Request, res: Response) => {
-  try {
-    const { items } = await getArmarioCatalog();
-    return res.status(200).json({ ok: true, items });
-  } catch (error: unknown) {
-    console.error('Error obteniendo armario:', error);
-    return res.status(500).json({
-      error: 'No se pudo obtener el armario.',
-      details: error instanceof Error ? error.message : String(error),
-    });
-  }
-});
+/* =========================================================
+   404 / ERROR HANDLER
+   ========================================================= */
 
-// 2. SUBIR Y AUTOCLASIFICAR PRENDA
-app.post('/ropa/prenda', appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
-  try {
-    const uploadedFile = (req as any).file as { buffer?: Buffer; originalname?: string; mimetype?: string } | undefined;
-    let buffer: Buffer | null = uploadedFile?.buffer || null;
-    let mimeType = uploadedFile?.mimetype || 'image/jpeg';
-    const body = getRequestBody(req);
-
-    if (!buffer) {
-      const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : (typeof body.base64 === 'string' ? body.base64 : '');
-      if (dataBase64) {
-        const clean = dataBase64.replace(/^data:[^;]+;base64,/i, '');
-        buffer = Buffer.from(clean, 'base64');
-        mimeType = typeof body.mimeType === 'string' ? body.mimeType : 'image/jpeg';
-      }
-    }
-
-    if (!buffer) {
-      return res.status(400).json({ error: 'Falta la imagen de la prenda.' });
-    }
-
-    // A. Catalogar con Gemini Vision
-    const base64Image = buffer.toString('base64');
-    const visionPrompt = `
-Analiza la prenda de vestir de la imagen y clasifícala estrictamente.
-Devuelve exclusivamente un JSON válido con esta estructura:
-{
-  "categoria": "superior" | "inferior" | "calzado" | "abrigo" | "accesorio",
-  "tipo": "nombre de la prenda (ej: remera lisa, cargo beige, borcegos, buzo oversize)",
-  "color": "color principal",
-  "estilo": "urbano / casual / deportivo / formal",
-  "estacion": "verano / invierno / media estacion"
-}
-`;
-
-    let metadata: any = {
-      categoria: 'superior',
-      tipo: 'prenda',
-      color: 'indefinido',
-      estilo: 'casual',
-      estacion: 'media estacion',
-    };
-
-    try {
-      const geminiRes: any = await runGemini<any>((ai) =>
-        ai.models.generateContent({
-          model: modelName,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                { text: visionPrompt },
-                { inlineData: { mimeType, data: base64Image } },
-              ],
-            },
-          ],
-          config: { responseMimeType: 'application/json', temperature: 0.2 },
-        })
-      );
-      const text = geminiRes.text?.trim() || '';
-      if (text) metadata = parseGeminiJson(text);
-    } catch (aiError) {
-      console.warn('Gemini falló al clasificar prenda, usando valores default:', aiError);
-    }
-
-    // B. Subir imagen a GitHub (ropa/prendas/)
-    const id = `item_${Date.now()}`;
-    const filename = `${id}.jpg`;
-    const imagePath = `ropa/prendas/${filename}`;
-    const uploadResult = await uploadToGithub(imagePath, buffer);
-
-    const newItem = {
-      id,
-      path: imagePath,
-      sha: uploadResult.sha,
-      url: `https://raw.githubusercontent.com/${uploadResult.owner}/${uploadResult.repo}/${uploadResult.branch}/${imagePath}`,
-      categoria: metadata.categoria || 'superior',
-      tipo: metadata.tipo || 'prenda',
-      color: metadata.color || 'indefinido',
-      estilo: metadata.estilo || 'casual',
-      estacion: metadata.estacion || 'media estacion',
-      estado: 'limpio',
-      fechaCreacion: new Date().toISOString(),
-    };
-
-    // C. Actualizar armario.json en GitHub
-    const { items } = await getArmarioCatalog();
-    items.push(newItem);
-
-    const catalogBuffer = Buffer.from(JSON.stringify(items, null, 2), 'utf8');
-    await uploadToGithub('ropa/armario.json', catalogBuffer);
-
-    return res.status(200).json({ ok: true, item: newItem });
-  } catch (error: unknown) {
-    console.error('Error subiendo prenda:', error);
-    return res.status(500).json({
-      error: 'No se pudo guardar la prenda.',
-      details: error instanceof Error ? error.message : String(error),
-    });
-  }
-});
-
-// 3. ELIMINAR PRENDA (Físico en GitHub + Lógico en JSON)
-app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Response) => {
-  try {
-    const id = getParamString(req.params.id);
-    const { items } = await getArmarioCatalog();
-    const itemIndex = items.findIndex((it) => it.id === id);
-
-    if (itemIndex === -1) {
-      return res.status(404).json({ error: 'Prenda no encontrada.' });
-    }
-
-    const item = items[itemIndex];
-    const { owner, repo, branch, token } = ghConfig();
-
-    // Borrar imagen física de GitHub si tiene path y sha
-    try {
-      let sha = item.sha;
-      if (!sha) {
-        const file = await getGithubFile(item.path);
-        sha = file?.sha;
-      }
-      if (sha) {
-        const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodePathForGithub(item.path)}`;
-        await fetch(url, {
-          method: 'DELETE',
-          headers: githubHeaders(token),
-          body: JSON.stringify({
-            message: `Delete garment: ${item.path}`,
-            sha,
-            branch,
-          }),
-        });
-      }
-    } catch (delError) {
-      console.warn('Aviso: no se pudo borrar imagen física en GitHub:', delError);
-    }
-
-    // Quitar del array y commitear armario.json
-    items.splice(itemIndex, 1);
-    const catalogBuffer = Buffer.from(JSON.stringify(items, null, 2), 'utf8');
-    await uploadToGithub('ropa/armario.json', catalogBuffer);
-
-    return res.status(200).json({ ok: true, message: 'Prenda eliminada.' });
-  } catch (error: unknown) {
-    console.error('Error eliminando prenda:', error);
-    return res.status(500).json({
-      error: 'Error eliminando prenda.',
-      details: error instanceof Error ? error.message : String(error),
-    });
-  }
-});
-
-// 4. SUBIR FOTO DEL AVATAR (ropa/perfil/avatar.jpg)
-app.post('/ropa/avatar', appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
-  try {
-    const uploadedFile = (req as any).file as { buffer?: Buffer } | undefined;
-    let buffer: Buffer | null = uploadedFile?.buffer || null;
-    const body = getRequestBody(req);
-
-    if (!buffer) {
-      const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : (typeof body.base64 === 'string' ? body.base64 : '');
-      if (dataBase64) {
-        const clean = dataBase64.replace(/^data:[^;]+;base64,/i, '');
-        buffer = Buffer.from(clean, 'base64');
-      }
-    }
-
-    if (!buffer) {
-      return res.status(400).json({ error: 'Falta la imagen del avatar.' });
-    }
-
-    const result = await uploadToGithub('ropa/perfil/avatar.jpg', buffer);
-    return res.status(200).json({
-      ok: true,
-      url: `https://raw.githubusercontent.com/${result.owner}/${result.repo}/${result.branch}/ropa/perfil/avatar.jpg`,
-    });
-  } catch (error: unknown) {
-    console.error('Error subiendo avatar:', error);
-    return res.status(500).json({
-      error: 'Error subiendo el avatar.',
-      details: error instanceof Error ? error.message : String(error),
-    });
-  }
-});
-
-// 5. CAMBIAR ESTADO DE PRENDAS (Lavar / Usar)
-app.post('/ropa/estado', appClientOrAuth, async (req: Request, res: Response) => {
-  try {
-    const body = getRequestBody(req);
-    const ids: string[] = Array.isArray(body.ids) ? body.ids : (body.id ? [body.id] : []);
-    const nuevoEstado: 'limpio' | 'usado' = body.estado === 'usado' ? 'usado' : 'limpio';
-    const resetAll = body.resetAll === true;
-
-    const { items } = await getArmarioCatalog();
-
-    items.forEach((item) => {
-      if (resetAll || ids.includes(item.id)) {
-        item.estado = nuevoEstado;
-      }
-    });
-
-    const catalogBuffer = Buffer.from(JSON.stringify(items, null, 2), 'utf8');
-    await uploadToGithub('ropa/armario.json', catalogBuffer);
-
-    return res.status(200).json({ ok: true, items });
-  } catch (error: unknown) {
-    console.error('Error actualizando estado:', error);
-    return res.status(500).json({
-      error: 'Error actualizando estado.',
-      details: error instanceof Error ? error.message : String(error),
-    });
-  }
-});
-
-// 6. GENERAR OUTFIT CON GEMINI + CLIMA DE LA PLATA
-app.post('/ropa/outfit', appClientOrAuth, async (req: Request, res: Response) => {
-  try {
-    const body = getRequestBody(req);
-    const ocasion = typeof body.ocasion === 'string' ? body.ocasion : 'Facultad / Taller';
-    const temporalidad = body.dia === 'manana' ? 'mañana' : 'hoy';
-
-    const { items } = await getArmarioCatalog();
-    const prendasLimpias = items.filter((it) => it.estado === 'limpio');
-
-    if (prendasLimpias.length === 0) {
-      return res.status(400).json({
-        error: 'No hay prendas limpias disponibles en el armario.',
-      });
-    }
-
-    const prompt = `
-Actúa como un estilista de moda profesional y personal.
-Tu tarea es armar el mejor outfit para ${temporalidad} para la ocasión: "${ocasion}".
-Ubicación geográfica: La Plata, Buenos Aires, Argentina.
-
-Teniendo en cuenta el clima estimado actual o típico de la temporada en La Plata, selecciona la combinación más armoniosa (colores, proporciones y abrigo adecuado) utilizando EXCLUSIVAMENTE prendas de este inventario disponible:
-
-${JSON.stringify(prendasLimpias, null, 2)}
-
-Devuelve ÚNICAMENTE un JSON válido con esta estructura:
-{
-  "climaResumen": "Breve estimación del clima considerado para La Plata (ej: Templado 20°C, soleado)",
-  "prendasElegidasIds": ["id_prenda_1", "id_prenda_2", "..."],
-  "explicacion": "Explicación de por qué combinan bien los colores, texturas y si abriga lo justo para el día"
-}
-`;
-
-    const geminiRes: any = await runGemini<any>((ai) =>
-      ai.models.generateContent({
-        model: modelName,
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        config: { responseMimeType: 'application/json', temperature: 0.3 },
-      })
-    );
-
-    const text = geminiRes.text?.trim() || '';
-    if (!text) throw new Error('Gemini devolvió respuesta vacía.');
-
-    const parsed = parseGeminiJson(text);
-    const prendasSeleccionadas = items.filter((it) => parsed.prendasElegidasIds?.includes(it.id));
-
-    return res.status(200).json({
-      ok: true,
-      clima: parsed.climaResumen,
-      explicacion: parsed.explicacion,
-      prendas: prendasSeleccionadas,
-    });
-  } catch (error: unknown) {
-    console.error('Error generando outfit:', error);
-    return res.status(500).json({
-      error: 'Error generando outfit.',
-      details: error instanceof Error ? error.message : String(error),
-    });
-  }
-});
 app.use((_req: Request, res: Response) => {
   return res.status(404).json({ error: 'Endpoint no encontrado.' });
 });
@@ -3398,10 +2969,6 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     details: error instanceof Error ? error.message : String(error),
   });
 });
-
-/* =========================================================
-   START
-   ========================================================= */
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log('======================================');
