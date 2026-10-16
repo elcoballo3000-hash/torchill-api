@@ -2690,7 +2690,7 @@ app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa
 });
 
 // 2. SUBIR Y AUTOCLASIFICAR PRENDA (Cualquier formato -> WebP -> R2 + Gemini)
-app.post('/ropa/prenda', appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
+app.post(['/ropa/upload', '/ropa/prenda', '/ropa/prendas', '/ropa/subir'], appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
   try {
     r2Config();
     const rawBuffer = extractFileBuffer(req);
