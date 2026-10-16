@@ -10,6 +10,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand,
   GetObjectCommand,
+  DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -2651,7 +2652,76 @@ function extractFileBuffer(req: Request): Buffer | null {
 }
 
 // 1. OBTENER CATÁLOGO DEL ARMARIO (Con URLs firmadas de R2)
-app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa/catalogo'], appClientOrAuth, async (_req: Request, res: Response) => {
+// ENDPOINT DE ANÁLISIS DE PRENDA PARA BASE44 (/ropa/analyze)
+app.post(['/ropa/analyze', '/api/ropa/analyze'], upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    const rawBuffer = extractFileBuffer(req);
+
+    if (!rawBuffer) {
+      return res.status(400).json({ error: 'Falta la imagen para analizar.' });
+    }
+
+    const webpBuffer = await convertBufferToWebp(rawBuffer);
+    const base64Image = webpBuffer.toString('base64');
+
+    const visionPrompt = `
+Analiza la prenda de vestir de la imagen y clasifícala estrictamente.
+Devuelve exclusivamente un JSON válido con esta estructura:
+{
+  "categoria": "superior" | "inferior" | "calzado" | "abrigo" | "accesorio",
+  "tipo": "nombre de la prenda (ej: remera lisa, cargo beige, borcegos, buzo oversize)",
+  "color": "color principal",
+  "estilo": "urbano / casual / deportivo / formal",
+  "estacion": "verano / invierno / media estacion"
+}
+`;
+
+    let metadata: any = {
+      categoria: 'superior',
+      tipo: 'prenda',
+      color: 'indefinido',
+      estilo: 'casual',
+      estacion: 'media estacion',
+    };
+
+    try {
+      const geminiRes: any = await runGemini<any>((ai) =>
+        ai.models.generateContent({
+          model: modelName,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: visionPrompt },
+                { inlineData: { mimeType: 'image/webp', data: base64Image } },
+              ],
+            },
+          ],
+          config: { responseMimeType: 'application/json', temperature: 0.2 },
+        })
+      );
+      const text = geminiRes.text?.trim() || '';
+      if (text) metadata = parseGeminiJson(text);
+    } catch (aiError) {
+      console.warn('Gemini falló en analyze, usando defaults:', aiError);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      detected: metadata,
+      ...metadata,
+    });
+  } catch (error: unknown) {
+    console.error('Error en /ropa/analyze:', error);
+    return res.status(500).json({
+      error: 'Error analizando la prenda.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+// 1. OBTENER CATÁLOGO DEL ARMARIO
+app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa/catalogo'], async (_req: Request, res: Response) => {
   try {
     r2Config();
     const { items } = await getArmarioCatalog();
@@ -2689,8 +2759,8 @@ app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa
   }
 });
 
-// 2. SUBIR Y AUTOCLASIFICAR PRENDA (Cualquier formato -> WebP -> R2 + Gemini)
-app.post(['/ropa/upload', '/ropa/prenda', '/ropa/prendas', '/ropa/subir'], appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
+// 2. SUBIR Y AUTOCLASIFICAR PRENDA
+app.post(['/ropa/upload', '/ropa/prenda', '/ropa/prendas', '/ropa/subir'], upload.single('file'), async (req: Request, res: Response) => {
   try {
     r2Config();
     const rawBuffer = extractFileBuffer(req);
@@ -2781,7 +2851,7 @@ Devuelve exclusivamente un JSON válido con esta estructura:
 });
 
 // 3. ELIMINAR PRENDA
-app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Response) => {
+app.delete(['/ropa/prenda/:id', '/ropa/prendas/:id'], async (req: Request, res: Response) => {
   try {
     const id = getParamString(req.params.id);
     const { items } = await getArmarioCatalog();
@@ -2796,7 +2866,6 @@ app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Respon
     if (item.r2Key) {
       try {
         const { bucket } = r2Config();
-        const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
         await getR2Client().send(
           new DeleteObjectCommand({
             Bucket: bucket,
@@ -2822,8 +2891,8 @@ app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Respon
   }
 });
 
-// 4. SUBIR FOTO DEL AVATAR A R2 (ropa/avatar/avatar.webp)
-app.post('/ropa/avatar', appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
+// 4. SUBIR FOTO DEL AVATAR A R2
+app.post('/ropa/avatar', upload.single('file'), async (req: Request, res: Response) => {
   try {
     r2Config();
     const rawBuffer = extractFileBuffer(req);
@@ -2850,8 +2919,8 @@ app.post('/ropa/avatar', appClientOrAuth, upload.single('file'), async (req: Req
   }
 });
 
-// 5. CAMBIAR ESTADO DE PRENDAS (Lavar / Usar)
-app.post('/ropa/estado', appClientOrAuth, async (req: Request, res: Response) => {
+// 5. CAMBIAR ESTADO DE PRENDAS
+app.post('/ropa/estado', async (req: Request, res: Response) => {
   try {
     const body = getRequestBody(req);
     const ids: string[] = Array.isArray(body.ids) ? body.ids : body.id ? [body.id] : [];
@@ -2880,7 +2949,7 @@ app.post('/ropa/estado', appClientOrAuth, async (req: Request, res: Response) =>
 });
 
 // 6. GENERAR OUTFIT CON GEMINI
-app.post('/ropa/outfit', appClientOrAuth, async (req: Request, res: Response) => {
+app.post('/ropa/outfit', async (req: Request, res: Response) => {
   try {
     const body = getRequestBody(req);
     const ocasion = typeof body.ocasion === 'string' ? body.ocasion : 'Facultad / Taller';
@@ -2953,7 +3022,6 @@ Devuelve ÚNICAMENTE un JSON válido con esta estructura:
     });
   }
 });
-
 /* =========================================================
    404 / ERROR HANDLER
    ========================================================= */
