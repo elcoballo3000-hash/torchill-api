@@ -10,6 +10,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand,
   GetObjectCommand,
+  DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -38,7 +39,7 @@ const upload = multer({
 app.use(
   cors({
     origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
   })
 );
@@ -227,7 +228,6 @@ function auth(req: Request, res: Response, next: NextFunction) {
   return next();
 }
 
-
 interface AppClientRateLimitEntry {
   count: number;
   resetAt: number;
@@ -365,7 +365,7 @@ async function getGithubFile(path: string) {
   const { owner, repo, branch, token } = ghConfig();
   const encodedPath = encodePathForGithub(path);
   const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+    `[https://api.github.com/repos/$](https://api.github.com/repos/$){encodeURIComponent(owner)}` +
     `/${encodeURIComponent(repo)}/contents/${encodedPath}` +
     `?ref=${encodeURIComponent(branch)}`;
 
@@ -388,11 +388,11 @@ async function uploadToGithub(path: string, data: Buffer) {
 
   const existing = await getGithubFile(safePath);
   const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+    `[https://api.github.com/repos/$](https://api.github.com/repos/$){encodeURIComponent(owner)}` +
     `/${encodeURIComponent(repo)}/contents/${encodePathForGithub(safePath)}`;
 
   const body: Record<string, any> = {
-    message: `Torchill receipt upload: ${safePath}`,
+    message: `Torchill file upload: ${safePath}`,
     content: data.toString('base64'),
     branch,
   };
@@ -431,7 +431,6 @@ function mimeForPath(path: string): string {
   return 'application/octet-stream';
 }
 
-
 /* =========================================================
    CLOUDFLARE R2 PRIVADO — STAR TAROT
    ========================================================= */
@@ -440,8 +439,6 @@ const TAROT_R2_WIDTHS = [320, 640, 960, 1280] as const;
 const TAROT_SIGNED_URL_TTL_SECONDS = 10 * 60;
 const MAX_SIGNED_CARDS_PER_REQUEST = 24;
 
-// Endpoint público-controlado para el frontend de Base44.
-// No usa API_TOKEN en el navegador.
 const TAROT_CLIENT_SIGNED_URL_TTL_SECONDS = 5 * 60;
 const TAROT_CLIENT_MAX_CARDS_PER_REQUEST = 12;
 const TAROT_CLIENT_RATE_LIMIT_PER_MINUTE = 30;
@@ -467,9 +464,6 @@ function isTarotClientOriginAllowed(origin: string): boolean {
   if (!normalized) return false;
 
   const allowedOrigins = getTarotClientAllowedOrigins();
-
-  // Por seguridad el endpoint queda deshabilitado hasta configurar
-  // TAROT_CLIENT_ORIGINS en Render.
   if (allowedOrigins.length === 0) return false;
 
   return allowedOrigins.includes(normalized);
@@ -510,7 +504,6 @@ function consumeTarotClientRateLimit(req: Request): {
 
   current.count += 1;
 
-  // Limpieza liviana para que el Map no crezca indefinidamente.
   if (tarotClientRateLimit.size > 5000) {
     for (const [key, value] of tarotClientRateLimit.entries()) {
       if (value.resetAt <= now) tarotClientRateLimit.delete(key);
@@ -575,11 +568,7 @@ function getR2Client(): S3Client {
 
 function tarotR2Key(number: number, width: number | 'original'): string {
   const filename = `juli_${String(number).padStart(2, '0')}.webp`;
-
-  if (width === 'original') {
-    return `tarot/original/${filename}`;
-  }
-
+  if (width === 'original') return `tarot/original/${filename}`;
   return `tarot/${width}/${filename}`;
 }
 
@@ -589,16 +578,12 @@ function tarotBackR2Key(width: number | 'original'): string {
 }
 
 function brandMarkR2Key(width: number | 'original'): string {
-  if (width === 'original') {
-    return 'tarot/brand/original/signo-marcario.webp';
-  }
-
+  if (width === 'original') return 'tarot/brand/original/signo-marcario.webp';
   return `tarot/brand/${width}/signo-marcario.webp`;
 }
 
 async function r2HasSameSourceSha(key: string, sourceSha: string): Promise<boolean> {
   const { bucket } = r2Config();
-
   try {
     const result = await getR2Client().send(
       new HeadObjectCommand({
@@ -606,7 +591,6 @@ async function r2HasSameSourceSha(key: string, sourceSha: string): Promise<boole
         Key: key,
       })
     );
-
     return String(result.Metadata?.source_sha || '') === sourceSha;
   } catch (error: any) {
     const status = error?.$metadata?.httpStatusCode;
@@ -617,14 +601,13 @@ async function r2HasSameSourceSha(key: string, sourceSha: string): Promise<boole
     ) {
       return false;
     }
-
     throw error;
   }
 }
 
 async function encodeTarotVariants(
   source: Buffer
-): Promise<Array<{ width: number | 'original'; buffer: Buffer }>> {
+): Promise<Array<{ 'original'; Buffer buffer: number width: | }>> {
   const image = await loadImage(source);
   const variants: Array<{ width: number | 'original'; buffer: Buffer }> = [];
 
@@ -718,12 +701,8 @@ async function putTarotBackVariantToR2(
   return key;
 }
 
-async function syncTarotBackToR2(
-  files: TarotFile[],
-  force = false
-) {
+async function syncTarotBackToR2(files: TarotFile[], force = false) {
   const file = findTarotBackFile(files);
-
   if (!file) {
     return {
       asset: 'dorso',
@@ -734,7 +713,6 @@ async function syncTarotBackToR2(
   }
 
   const probeKey = tarotBackR2Key(640);
-
   if (!force && await r2HasSameSourceSha(probeKey, file.sha)) {
     return {
       asset: 'dorso',
@@ -755,7 +733,6 @@ async function syncTarotBackToR2(
       variant.buffer,
       file.sha
     );
-
     uploaded.push({
       width: variant.width,
       key,
@@ -772,7 +749,6 @@ async function syncTarotBackToR2(
     variants: uploaded,
   };
 }
-
 
 async function putBrandMarkVariantToR2(
   width: number | 'original',
@@ -800,24 +776,18 @@ async function putBrandMarkVariantToR2(
   return key;
 }
 
-async function syncBrandMarkToR2(
-  files: TarotFile[],
-  force = false
-) {
+async function syncBrandMarkToR2(files: TarotFile[], force = false) {
   const file = findBrandMarkFile(files);
-
   if (!file) {
     return {
       asset: 'signo-marcario',
       ok: false,
       skipped: false,
-      error:
-        'No se encontró Signo-marcario.jpg/jpeg/png/webp dentro de GitHub /tarot.',
+      error: 'No se encontró Signo-marcario.jpg/jpeg/png/webp dentro de GitHub /tarot.',
     };
   }
 
   const probeKey = brandMarkR2Key(640);
-
   if (!force && await r2HasSameSourceSha(probeKey, file.sha)) {
     return {
       asset: 'signo-marcario',
@@ -838,7 +808,6 @@ async function syncBrandMarkToR2(
       variant.buffer,
       file.sha
     );
-
     uploaded.push({
       width: variant.width,
       key,
@@ -856,13 +825,8 @@ async function syncBrandMarkToR2(
   };
 }
 
-async function syncTarotCardToR2(
-  number: number,
-  files: TarotFile[],
-  force = false
-) {
+async function syncTarotCardToR2(number: number, files: TarotFile[], force = false) {
   const file = findTarotFile(number, files);
-
   if (!file) {
     return {
       juli: number,
@@ -872,9 +836,7 @@ async function syncTarotCardToR2(
     };
   }
 
-  // Con revisar 640 alcanza: todas las variantes se escriben juntas.
   const probeKey = tarotR2Key(number, 640);
-
   if (!force && await r2HasSameSourceSha(probeKey, file.sha)) {
     return {
       juli: number,
@@ -887,7 +849,6 @@ async function syncTarotCardToR2(
 
   const original = await fetchTarotOriginal(number, file);
   const variants = await encodeTarotVariants(original.buffer);
-
   const uploaded = [];
 
   for (const variant of variants) {
@@ -897,7 +858,6 @@ async function syncTarotCardToR2(
       variant.buffer,
       file.sha
     );
-
     uploaded.push({
       width: variant.width,
       key,
@@ -915,10 +875,7 @@ async function syncTarotCardToR2(
   };
 }
 
-async function syncTarotNumbersToR2(
-  numbers: number[],
-  force = false
-) {
+async function syncTarotNumbersToR2(numbers: number[], force = false) {
   const uniqueNumbers = [...new Set(numbers)]
     .filter((value) => Number.isInteger(value) && value > 0)
     .sort((a, b) => a - b);
@@ -926,7 +883,6 @@ async function syncTarotNumbersToR2(
   const files = await listTarotFiles(true);
   const results: any[] = [];
 
-  // Intencionalmente secuencial: evita picos fuertes de RAM/CPU en Render.
   for (const number of uniqueNumbers) {
     try {
       results.push(await syncTarotCardToR2(number, files, force));
@@ -949,7 +905,6 @@ async function createTarotSignedUrl(
   expiresIn: number
 ): Promise<string> {
   const { bucket } = r2Config();
-
   return getSignedUrl(
     getR2Client(),
     new GetObjectCommand({
@@ -965,7 +920,6 @@ async function createTarotBackSignedUrl(
   expiresIn: number
 ): Promise<string> {
   const { bucket } = r2Config();
-
   return getSignedUrl(
     getR2Client(),
     new GetObjectCommand({
@@ -981,7 +935,6 @@ async function createBrandMarkSignedUrl(
   expiresIn: number
 ): Promise<string> {
   const { bucket } = r2Config();
-
   return getSignedUrl(
     getR2Client(),
     new GetObjectCommand({
@@ -999,7 +952,6 @@ function verifyGithubWebhookSignature(req: Request): boolean {
   const receivedSignature = String(
     req.headers['x-hub-signature-256'] || ''
   );
-
   if (!receivedSignature.startsWith('sha256=')) return false;
 
   const rawBody = (req as any).rawBody as Buffer | undefined;
@@ -1016,60 +968,48 @@ function verifyGithubWebhookSignature(req: Request): boolean {
   const expectedBuffer = Buffer.from(expectedSignature);
 
   if (receivedBuffer.length !== expectedBuffer.length) return false;
-
   return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
 function githubPushChangedTarotBack(body: any): boolean {
   const commits = Array.isArray(body?.commits) ? body.commits : [];
-
   for (const commit of commits) {
     for (const group of ['added', 'modified', 'removed']) {
       const paths = Array.isArray(commit?.[group]) ? commit[group] : [];
-
       for (const path of paths) {
         if (typeof path !== 'string') continue;
         if (!/^tarot\//i.test(path)) continue;
-
         const filename = path.split('/').pop() || '';
         if (isTarotBackFilename(filename)) return true;
       }
     }
   }
-
   return false;
 }
 
-
 function githubPushChangedBrandMark(body: any): boolean {
   const commits = Array.isArray(body?.commits) ? body.commits : [];
-
   for (const commit of commits) {
     for (const group of ['added', 'modified', 'removed']) {
       const paths = Array.isArray(commit?.[group]) ? commit[group] : [];
-
       for (const path of paths) {
         if (typeof path !== 'string') continue;
         if (!/^tarot\//i.test(path)) continue;
-
         const filename = path.split('/').pop() || '';
         if (isBrandMarkFilename(filename)) return true;
       }
     }
   }
-
   return false;
 }
 
 function extractTarotNumbersFromGithubPush(body: any): number[] {
   const changedPaths = new Set<string>();
-
   const commits = Array.isArray(body?.commits) ? body.commits : [];
 
   for (const commit of commits) {
     for (const group of ['added', 'modified', 'removed']) {
       const paths = Array.isArray(commit?.[group]) ? commit[group] : [];
-
       for (const path of paths) {
         if (typeof path === 'string') changedPaths.add(path);
       }
@@ -1077,12 +1017,8 @@ function extractTarotNumbersFromGithubPush(body: any): number[] {
   }
 
   const numbers = new Set<number>();
-
   for (const path of changedPaths) {
-    // MUY IMPORTANTE:
-    // receipts/* y cualquier otra carpeta del mismo repo quedan ignoradas.
     if (!/^tarot\//i.test(path)) continue;
-
     const filename = path.split('/').pop() || '';
     const number = getTarotNumberFromFilename(filename);
     if (number !== null) numbers.add(number);
@@ -1093,12 +1029,6 @@ function extractTarotNumbersFromGithubPush(body: any): number[] {
 
 /* =========================================================
    PDF -> PNG AISLADO EN PROCESO HIJO
-
-   IMPORTANTE:
-   - El proceso principal NO renderiza PDFs con PDF.js.
-   - Si pdfjs-dist / @napi-rs/canvas falla nativamente, solamente muere
-     el proceso hijo.
-   - El caller puede hacer fallback al PDF original.
    ========================================================= */
 
 const PDF_WORKER_SCRIPT = String.raw`
@@ -1112,15 +1042,11 @@ class SafeCanvasFactory {
     return { canvas, context };
   }
   reset(canvasAndContext, width, height) {
-    // @napi-rs/canvas puede fallar si PDF.js intenta mutar/destruir
-    // referencias nativas compartidas. Creamos un canvas nuevo.
     const canvas = createCanvas(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
     canvasAndContext.canvas = canvas;
     canvasAndContext.context = canvas.getContext('2d');
   }
   destroy(canvasAndContext) {
-    // NO hacer canvas.width = 0 ni canvas.height = 0.
-    // Ese patrón es justamente el que puede disparar InvalidArg en N-API.
     canvasAndContext.context = null;
     canvasAndContext.canvas = null;
   }
@@ -1169,7 +1095,7 @@ class SafeCanvasFactory {
 })();
 `;
 
-async function pdfFirstPageToPngSafe(buffer: Buffer): Promise<Buffer | null> {
+async function pdfFirstPageToPngSafe(buffer: Buffer): Promise<Buffer null |> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ['-e', PDF_WORKER_SCRIPT], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -1323,7 +1249,7 @@ async function listTarotFiles(forceRefresh = false): Promise<TarotFile[]> {
 
   const { owner, repo, branch, token } = ghConfig();
   const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+    `[https://api.github.com/repos/$](https://api.github.com/repos/$){encodeURIComponent(owner)}` +
     `/${encodeURIComponent(repo)}/contents/tarot?ref=${encodeURIComponent(branch)}`;
 
   const response = await fetch(url, { headers: githubHeaders(token) });
@@ -1354,19 +1280,10 @@ async function listTarotFiles(forceRefresh = false): Promise<TarotFile[]> {
 }
 
 function getTarotNumberFromFilename(filename: string): number | null {
-  // Formato real actual:
-  // "tarot juli-1.jpg"
-  // "tarot juli-10.jpg"
-  // "tarot juli-78.webp"
-  //
-  // También tolera espacios, "_" y ceros iniciales:
-  // "tarot_juli_01.jpg", "juli 001.png", etc.
   const match = filename.match(
     /(?:^|[\s_-])juli[\s_-]*0*(\d+)(?=\D|$)/i
   );
-
   if (!match) return null;
-
   const number = Number.parseInt(match[1], 10);
   return Number.isInteger(number) && number > 0 ? number : null;
 }
@@ -1406,7 +1323,7 @@ async function fetchTarotOriginal(number: number, file: TarotFile) {
 
   const { owner, repo, branch, token } = ghConfig();
   const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+    `[https://api.github.com/repos/$](https://api.github.com/repos/$){encodeURIComponent(owner)}` +
     `/${encodeURIComponent(repo)}/contents/tarot/${encodeURIComponent(file.name)}` +
     `?ref=${encodeURIComponent(branch)}`;
 
@@ -1446,9 +1363,8 @@ async function fetchTarotOriginal(number: number, file: TarotFile) {
 
 async function fetchTarotFileBuffer(file: TarotFile): Promise<Buffer> {
   const { owner, repo, branch, token } = ghConfig();
-
   const url =
-    `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+    `[https://api.github.com/repos/$](https://api.github.com/repos/$){encodeURIComponent(owner)}` +
     `/${encodeURIComponent(repo)}/contents/tarot/${encodeURIComponent(file.name)}` +
     `?ref=${encodeURIComponent(branch)}`;
 
@@ -1602,7 +1518,7 @@ app.get('/receipt/:pathB64', async (req: Request, res: Response) => {
 
     const { owner, repo, branch, token } = ghConfig();
     const url =
-      `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+      `[https://api.github.com/repos/$](https://api.github.com/repos/$){encodeURIComponent(owner)}` +
       `/${encodeURIComponent(repo)}/contents/${encodePathForGithub(path)}` +
       `?ref=${encodeURIComponent(branch)}`;
 
@@ -1728,7 +1644,7 @@ app.get('/tarot-manifest', auth, async (_req: Request, res: Response) => {
 
     try {
       const response = await fetch(
-        `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+        `[https://api.github.com/repos/$](https://api.github.com/repos/$){encodeURIComponent(owner)}` +
         `/${encodeURIComponent(repo)}/branches/${encodeURIComponent(branch)}`,
         { headers: githubHeaders(token) }
       );
@@ -1766,23 +1682,13 @@ app.get('/tarot-manifest', auth, async (_req: Request, res: Response) => {
   }
 });
 
-
 /* =========================================================
    TAROT PRIVADO EN CLOUDFLARE R2
    ========================================================= */
 
-// Primera sincronización:
-// POST /api/tarot/sync
-//
-// Solo algunas cartas:
-// POST /api/tarot/sync?cards=1,2,17
-//
-// Forzar regeneración:
-// POST /api/tarot/sync?cards=17&force=1
 app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
   try {
     r2Config();
-
     const files = await listTarotFiles(true);
     const body = getRequestBody(req);
 
@@ -1859,18 +1765,9 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
       }
     }
 
-    const synced = results.filter(
-      (item) => item.ok && !item.skipped
-    ).length;
-
-    const skipped = results.filter(
-      (item) => item.ok && item.skipped
-    ).length;
-
-    const failed = results.filter(
-      (item) => !item.ok
-    ).length;
-
+    const synced = results.filter((item) => item.ok && !item.skipped).length;
+    const skipped = results.filter((item) => item.ok && item.skipped).length;
+    const failed = results.filter((item) => !item.ok).length;
     const backFailed = backResult && !backResult.ok ? 1 : 0;
     const brandFailed = brandResult && !brandResult.ok ? 1 : 0;
 
@@ -1886,7 +1783,6 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
     });
   } catch (error: unknown) {
     console.error('Tarot R2 sync error:', error);
-
     return res.status(500).json({
       ok: false,
       error: error instanceof Error ? error.message : String(error),
@@ -1894,8 +1790,6 @@ app.post('/api/tarot/sync', auth, async (req: Request, res: Response) => {
   }
 });
 
-// Base44 NO debe tener credenciales R2.
-// Su backend pide URLs temporales a este endpoint.
 app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
   try {
     r2Config();
@@ -1906,7 +1800,6 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
       .filter((value) => Number.isInteger(value) && value > 0);
 
     const cards = [...new Set(requestedCards)];
-
     if (cards.length === 0) {
       return res.status(400).json({
         ok: false,
@@ -1927,22 +1820,18 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
       .filter(Boolean);
 
     const widths: Array<number | 'original'> = [];
-
     for (const token of widthTokens) {
       if (token === 'original') {
         widths.push('original');
         continue;
       }
-
       const width = Number.parseInt(token, 10);
-
       if ((TAROT_R2_WIDTHS as readonly number[]).includes(width)) {
         widths.push(width);
       }
     }
 
     const uniqueWidths = [...new Set(widths)];
-
     if (uniqueWidths.length === 0) {
       return res.status(400).json({
         ok: false,
@@ -1950,11 +1839,7 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
       });
     }
 
-    const requestedExpiry = Number.parseInt(
-      String(req.query.expires || ''),
-      10
-    );
-
+    const requestedExpiry = Number.parseInt(String(req.query.expires || ''), 10);
     const expiresIn = Number.isFinite(requestedExpiry)
       ? Math.max(60, Math.min(900, requestedExpiry))
       : TAROT_SIGNED_URL_TTL_SECONDS;
@@ -1963,26 +1848,20 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
 
     for (const card of cards) {
       result[String(card)] = {};
-
       for (const width of uniqueWidths) {
-        result[String(card)][String(width)] =
-          await createTarotSignedUrl(card, width, expiresIn);
+        result[String(card)][String(width)] = await createTarotSignedUrl(card, width, expiresIn);
       }
     }
 
     res.setHeader('Cache-Control', 'private, no-store');
-
     return res.status(200).json({
       ok: true,
       expiresIn,
-      expiresAt: new Date(
-        Date.now() + expiresIn * 1000
-      ).toISOString(),
+      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
       cards: result,
     });
   } catch (error: unknown) {
     console.error('Tarot signed URLs error:', error);
-
     return res.status(500).json({
       ok: false,
       error: error instanceof Error ? error.message : String(error),
@@ -1990,26 +1869,6 @@ app.get('/api/tarot/urls', auth, async (req: Request, res: Response) => {
   }
 });
 
-
-// ================================================================
-// FRONTEND BASE44 SIN BACKEND FUNCTIONS / SIN INTEGRATION CREDITS
-//
-// Este endpoint NO recibe API_TOKEN desde el navegador.
-// Seguridad aplicada:
-// - Origin permitido configurado en TAROT_CLIENT_ORIGINS.
-// - Máximo 12 cartas por request.
-// - Solamente cartas 3..80.
-// - Solamente 320/640/960/1280 (nunca "original").
-// - URLs R2 firmadas por 5 minutos.
-// - Rate limit por IP.
-// - Solo lectura; no lista/escribe/borra objetos.
-//
-// IMPORTANTE:
-// CORS ayuda a limitar el uso desde navegadores, pero no convierte
-// este endpoint en autenticación fuerte. Una persona técnicamente
-// avanzada podría imitar un Origin fuera del navegador. Por eso
-// también existen límites, expiración corta y un alcance mínimo.
-// ================================================================
 app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
   try {
     r2Config();
@@ -2033,29 +1892,21 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
       });
     }
 
-    // Sobrescribe el CORS global "*" específicamente para esta ruta.
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     const limit = consumeTarotClientRateLimit(req);
-    res.setHeader(
-      'X-RateLimit-Limit',
-      String(TAROT_CLIENT_RATE_LIMIT_PER_MINUTE)
-    );
+    res.setHeader('X-RateLimit-Limit', String(TAROT_CLIENT_RATE_LIMIT_PER_MINUTE));
     res.setHeader('X-RateLimit-Remaining', String(limit.remaining));
-    res.setHeader(
-      'X-RateLimit-Reset',
-      String(Math.ceil(limit.resetAt / 1000))
-    );
+    res.setHeader('X-RateLimit-Reset', String(Math.ceil(limit.resetAt / 1000)));
 
     if (!limit.allowed) {
       res.setHeader(
         'Retry-After',
         String(Math.max(1, Math.ceil((limit.resetAt - Date.now()) / 1000)))
       );
-
       return res.status(429).json({
         ok: false,
         error: 'Demasiadas solicitudes. Reintentá en unos segundos.',
@@ -2073,7 +1924,6 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
       );
 
     const cards = [...new Set(requestedCards)];
-
     const includeBack =
       String(req.query.back || '') === '1' ||
       String(req.query.includeBack || '') === '1';
@@ -2094,9 +1944,7 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
     if (cards.length > TAROT_CLIENT_MAX_CARDS_PER_REQUEST) {
       return res.status(400).json({
         ok: false,
-        error:
-          `Máximo ${TAROT_CLIENT_MAX_CARDS_PER_REQUEST} cartas ` +
-          'por solicitud desde el frontend.',
+        error: `Máximo ${TAROT_CLIENT_MAX_CARDS_PER_REQUEST} cartas por solicitud desde el frontend.`,
       });
     }
 
@@ -2106,41 +1954,31 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
       .filter(Boolean);
 
     const widths: number[] = [];
-
     for (const token of widthTokens) {
-      // "original" queda expresamente prohibido en el endpoint cliente.
       if (token.toLowerCase() === 'original') continue;
-
       const width = Number.parseInt(token, 10);
-
       if ((TAROT_R2_WIDTHS as readonly number[]).includes(width)) {
         widths.push(width);
       }
     }
 
     const uniqueWidths = [...new Set(widths)];
-
     if (uniqueWidths.length === 0) {
       return res.status(400).json({
         ok: false,
-        error:
-          'widths inválido. Desde el frontend solo se permiten ' +
-          '320,640,960,1280.',
+        error: 'widths inválido. Desde el frontend solo se permiten 320,640,960,1280.',
       });
     }
 
     const result: Record<string, Record<string, string>> = {};
-
     for (const card of cards) {
       result[String(card)] = {};
-
       for (const width of uniqueWidths) {
-        result[String(card)][String(width)] =
-          await createTarotSignedUrl(
-            card,
-            width,
-            TAROT_CLIENT_SIGNED_URL_TTL_SECONDS
-          );
+        result[String(card)][String(width)] = await createTarotSignedUrl(
+          card,
+          width,
+          TAROT_CLIENT_SIGNED_URL_TTL_SECONDS
+        );
       }
     }
 
@@ -2170,16 +2008,13 @@ app.get('/api/tarot/client-urls', async (req: Request, res: Response) => {
     return res.status(200).json({
       ok: true,
       expiresIn: TAROT_CLIENT_SIGNED_URL_TTL_SECONDS,
-      expiresAt: new Date(
-        Date.now() + TAROT_CLIENT_SIGNED_URL_TTL_SECONDS * 1000
-      ).toISOString(),
+      expiresAt: new Date(Date.now() + TAROT_CLIENT_SIGNED_URL_TTL_SECONDS * 1000).toISOString(),
       cards: result,
       back: includeBack ? back : undefined,
       brand: includeBrand ? brand : undefined,
     });
   } catch (error: unknown) {
     console.error('Tarot client signed URLs error:', error);
-
     return res.status(500).json({
       ok: false,
       error: error instanceof Error ? error.message : String(error),
@@ -2193,12 +2028,10 @@ app.get('/api/tarot/manifest', auth, async (_req: Request, res: Response) => {
     r2Config();
 
     const files = await listTarotFiles(true);
-
     const cards = files
       .map((file) => {
         const number = getTarotNumberFromFilename(file.name);
         if (number === null) return null;
-
         return {
           juli: number,
           name: file.name,
@@ -2210,7 +2043,6 @@ app.get('/api/tarot/manifest', auth, async (_req: Request, res: Response) => {
       .sort((a: any, b: any) => a.juli - b.juli);
 
     res.setHeader('Cache-Control', 'private, no-store');
-
     return res.status(200).json({
       ok: true,
       branch,
@@ -2228,8 +2060,6 @@ app.get('/api/tarot/manifest', auth, async (_req: Request, res: Response) => {
   }
 });
 
-// GitHub webhook.
-// Los pushes que solo cambian receipts/* son ignorados.
 app.post('/api/github/webhook', async (req: Request, res: Response) => {
   try {
     if (!verifyGithubWebhookSignature(req)) {
@@ -2239,32 +2069,14 @@ app.post('/api/github/webhook', async (req: Request, res: Response) => {
       });
     }
 
-    const githubEvent = String(
-      req.headers['x-github-event'] || ''
-    );
-
-    if (githubEvent === 'ping') {
-      return res.status(200).json({
-        ok: true,
-        event: 'ping',
-      });
-    }
-
-    if (githubEvent !== 'push') {
-      return res.status(200).json({
-        ok: true,
-        ignored: true,
-        event: githubEvent,
-      });
-    }
+    const githubEvent = String(req.headers['x-github-event'] || '');
+    if (githubEvent === 'ping') return res.status(200).json({ ok: true, event: 'ping' });
+    if (githubEvent !== 'push') return res.status(200).json({ ok: true, ignored: true, event: githubEvent });
 
     const branch = process.env.GITHUB_BRANCH || 'main';
     const pushedRef = String((req.body as any)?.ref || '');
 
-    if (
-      pushedRef &&
-      pushedRef !== `refs/heads/${branch}`
-    ) {
+    if (pushedRef && pushedRef !== `refs/heads/${branch}`) {
       return res.status(200).json({
         ok: true,
         ignored: true,
@@ -2280,17 +2092,11 @@ app.post('/api/github/webhook', async (req: Request, res: Response) => {
       return res.status(200).json({
         ok: true,
         ignored: true,
-        reason:
-          'El push no modificó cartas juli_XX, dorso ni Signo-marcario dentro de /tarot. ' +
-          'receipts/ no dispara sincronización.',
+        reason: 'El push no modificó cartas juli_XX, dorso ni Signo-marcario dentro de /tarot.',
       });
     }
 
-    const results =
-      cards.length > 0
-        ? await syncTarotNumbersToR2(cards, true)
-        : [];
-
+    const results = cards.length > 0 ? await syncTarotNumbersToR2(cards, true) : [];
     let backResult: any = null;
     let brandResult: any = null;
 
@@ -2339,7 +2145,6 @@ app.post('/api/github/webhook', async (req: Request, res: Response) => {
     });
   } catch (error: unknown) {
     console.error('GitHub webhook error:', error);
-
     return res.status(500).json({
       ok: false,
       error: error instanceof Error ? error.message : String(error),
@@ -2368,11 +2173,8 @@ app.post('/api/gemini/project-copy', appClientOrAuth, async (req: Request, res: 
     }
 
     if (action === 'translate') {
-      if (!Array.isArray(segments)) {
-        return res.status(400).json({ error: '"segments" debe ser un array.' });
-      }
-      if (segments.length === 0) {
-        return res.status(400).json({ error: '"segments" no puede estar vacío.' });
+      if (!Array.isArray(segments) || segments.length === 0) {
+        return res.status(400).json({ error: '"segments" debe ser un array no vacío.' });
       }
 
       const targetLanguage = language === 'en' ? 'inglés' : 'español';
@@ -2436,14 +2238,9 @@ Texto original:
 ${text}
 
 Objetivos:
-- Mejorar la claridad.
-- Mejorar la redacción.
-- Mantener la intención original.
-- Utilizar lenguaje profesional.
-- Evitar frases publicitarias genéricas.
-- No inventar información.
-- No agregar datos inexistentes.
-- Mantener el contenido apropiado para un portfolio de diseño.
+- Mejorar la claridad y la redacción.
+- Mantener la intención original con lenguaje profesional.
+- Evitar frases publicitarias genéricas y no inventar información.
 
 Devuelve exclusivamente JSON válido con esta estructura:
 {
@@ -2490,18 +2287,15 @@ Devuelve exclusivamente JSON válido con esta estructura:
     return res.status(200).json(parseGeminiJson(output));
   } catch (error: unknown) {
     console.error('Gemini project-copy error:', error);
-
     if (isRateLimitError(error)) {
       return res.status(429).json({
         error: 'Todas las API keys de Gemini están temporalmente limitadas.',
         retryable: true,
       });
     }
-
-    const message = error instanceof Error ? error.message : String(error);
     return res.status(500).json({
       error: 'Error procesando la solicitud con Gemini.',
-      details: message,
+      details: error instanceof Error ? error.message : String(error),
     });
   }
 });
@@ -2557,12 +2351,109 @@ app.post('/generate-text', appClientOrAuth, async (req: Request, res: Response) 
 
 /* =========================================================
    ANALYZE RECEIPT
-
-   pdfMode:
-   - auto   (default): intenta PNG; si falla, manda PDF original.
-   - image: intenta PNG; si falla, manda PDF original.
-   - native: manda el PDF original directamente.
    ========================================================= */
+
+app.post('/analyze-receipt', appClientOrAuth, async (req: Request, res: Response) => {
+  try {
+    if (apiKeys.length === 0) {
+      return res.status(503).json({ error: 'El servicio Gemini no está configurado.' });
+    }
+
+    const body = getRequestBody(req);
+    const fileUrl = typeof body.fileUrl === 'string' ? body.fileUrl.trim() : '';
+    const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+    const requestedPdfMode = typeof body.pdfMode === 'string' ? body.pdfMode.toLowerCase() : 'auto';
+    const pdfMode = ['auto', 'image', 'native'].includes(requestedPdfMode)
+      ? requestedPdfMode
+      : 'auto';
+
+    if (!fileUrl) return res.status(400).json({ error: 'fileUrl es requerido.' });
+    if (!prompt) return res.status(400).json({ error: 'prompt es requerido.' });
+
+    const downloaded = await downloadReceipt(fileUrl);
+    let dataBuffer = downloaded.buffer;
+    let mimeType = downloaded.mimeType;
+    let pdfProcessing: 'not-pdf' | 'native' | 'image' | 'native-fallback' = 'not-pdf';
+
+    const isPdf =
+      mimeType === 'application/pdf' ||
+      fileUrl.toLowerCase().split('?')[0].endsWith('.pdf');
+
+    if (isPdf) {
+      if (pdfMode === 'native') {
+        pdfProcessing = 'native';
+      } else {
+        const png = await pdfFirstPageToPngSafe(downloaded.buffer);
+        if (png) {
+          dataBuffer = png;
+          mimeType = 'image/png';
+          pdfProcessing = 'image';
+        } else {
+          dataBuffer = downloaded.buffer;
+          mimeType = 'application/pdf';
+          pdfProcessing = 'native-fallback';
+        }
+      }
+    }
+
+    const base64 = dataBuffer.toString('base64');
+    const geminiPrompt = `
+${prompt}
+
+IMPORTANTE:
+- Analiza cuidadosamente el comprobante.
+- Extrae únicamente información visible o claramente inferible.
+- No inventes datos.
+- Si un campo no puede determinarse, utiliza null.
+- Devuelve ÚNICAMENTE JSON válido.
+`;
+
+    const response: any = await runGemini<any>((ai) =>
+      ai.models.generateContent({
+        model: modelName,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: geminiPrompt },
+              { inlineData: { mimeType, data: base64 } },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      })
+    );
+
+    const text = response.text?.trim() || '';
+    if (!text) throw new Error('Gemini devolvió una respuesta vacía.');
+
+    const parsed = parseGeminiJson(text);
+    return res.status(200).json({
+      ok: true,
+      detected: parsed,
+      raw: text,
+      inputMimeType: downloaded.mimeType,
+      sentMimeType: mimeType,
+      pdfMode,
+      pdfProcessing,
+    });
+  } catch (error: unknown) {
+    console.error('Analyze receipt error:', error);
+    if (isRateLimitError(error)) {
+      return res.status(429).json({
+        error: 'Todas las API keys de Gemini están temporalmente limitadas.',
+        retryable: true,
+      });
+    }
+    return res.status(500).json({
+      error: 'Error analizando el comprobante.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
 
 /* =========================================================
    MÓDULO ARMARIO Y OUTFITS CON CLOUDFLARE R2 (/ropa/*)
@@ -2570,7 +2461,6 @@ app.post('/generate-text', appClientOrAuth, async (req: Request, res: Response) 
 
 const ROPA_URL_TTL_SECONDS = 60 * 60; // 1 hora de validez para las imágenes
 
-// Helper: Crear URL firmada para un objeto de R2
 async function createR2SignedUrl(key: string, expiresIn: number = ROPA_URL_TTL_SECONDS): Promise<string> {
   const { bucket } = r2Config();
   return getSignedUrl(
@@ -2583,7 +2473,6 @@ async function createR2SignedUrl(key: string, expiresIn: number = ROPA_URL_TTL_S
   );
 }
 
-// Helper: Guardar un buffer WebP en R2
 async function putR2GarmentObject(key: string, buffer: Buffer): Promise<void> {
   const { bucket } = r2Config();
   await getR2Client().send(
@@ -2597,7 +2486,6 @@ async function putR2GarmentObject(key: string, buffer: Buffer): Promise<void> {
   );
 }
 
-// Helper: Convertir cualquier imagen (JPG, PNG, JFIF, WEBP) a WebP optimizado
 async function convertBufferToWebp(inputBuffer: Buffer, maxWidth = 1200): Promise<Buffer> {
   const image = await loadImage(inputBuffer);
   const outputWidth = Math.min(maxWidth, image.width);
@@ -2614,7 +2502,6 @@ async function convertBufferToWebp(inputBuffer: Buffer, maxWidth = 1200): Promis
   return Buffer.from(await canvas.encode('webp', 88));
 }
 
-// Helper: Leer catálogo de GitHub
 async function getArmarioCatalog(): Promise<{ sha: string | null; items: any[] }> {
   try {
     const file = await getGithubFile('ropa/armario.json');
@@ -2629,7 +2516,6 @@ async function getArmarioCatalog(): Promise<{ sha: string | null; items: any[] }
   }
 }
 
-// Helper para extraer Buffer de multipart o Base64
 function extractFileBuffer(req: Request): Buffer | null {
   const uploadedFile = (req as any).file as { buffer?: Buffer } | undefined;
   if (uploadedFile?.buffer) return uploadedFile.buffer;
@@ -2650,8 +2536,8 @@ function extractFileBuffer(req: Request): Buffer | null {
   return null;
 }
 
-// 1. OBTENER CATÁLOGO DEL ARMARIO (Con URLs firmadas de R2)
-app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa/catalogo'], appClientOrAuth, async (_req: Request, res: Response) => {
+// 1. OBTENER CATÁLOGO DEL ARMARIO (Sin appClientOrAuth)
+app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa/catalogo'], async (_req: Request, res: Response) => {
   try {
     r2Config();
     const { items } = await getArmarioCatalog();
@@ -2689,8 +2575,8 @@ app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa
   }
 });
 
-// 2. SUBIR Y AUTOCLASIFICAR PRENDA (Cualquier formato -> WebP -> R2 + Gemini)
-app.post(['/ropa/upload', '/ropa/prenda', '/ropa/prendas', '/ropa/subir'], appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
+// 2. SUBIR Y AUTOCLASIFICAR PRENDA (Sin appClientOrAuth)
+app.post(['/ropa/upload', '/ropa/prenda', '/ropa/prendas', '/ropa/subir'], upload.single('file'), async (req: Request, res: Response) => {
   try {
     r2Config();
     const rawBuffer = extractFileBuffer(req);
@@ -2780,8 +2666,8 @@ Devuelve exclusivamente un JSON válido con esta estructura:
   }
 });
 
-// 3. ELIMINAR PRENDA
-app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Response) => {
+// 3. ELIMINAR PRENDA (Sin appClientOrAuth)
+app.delete('/ropa/prenda/:id', async (req: Request, res: Response) => {
   try {
     const id = getParamString(req.params.id);
     const { items } = await getArmarioCatalog();
@@ -2796,7 +2682,6 @@ app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Respon
     if (item.r2Key) {
       try {
         const { bucket } = r2Config();
-        const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
         await getR2Client().send(
           new DeleteObjectCommand({
             Bucket: bucket,
@@ -2822,8 +2707,8 @@ app.delete('/ropa/prenda/:id', appClientOrAuth, async (req: Request, res: Respon
   }
 });
 
-// 4. SUBIR FOTO DEL AVATAR A R2 (ropa/avatar/avatar.webp)
-app.post('/ropa/avatar', appClientOrAuth, upload.single('file'), async (req: Request, res: Response) => {
+// 4. SUBIR FOTO DEL AVATAR A R2 (Sin appClientOrAuth)
+app.post('/ropa/avatar', upload.single('file'), async (req: Request, res: Response) => {
   try {
     r2Config();
     const rawBuffer = extractFileBuffer(req);
@@ -2850,8 +2735,8 @@ app.post('/ropa/avatar', appClientOrAuth, upload.single('file'), async (req: Req
   }
 });
 
-// 5. CAMBIAR ESTADO DE PRENDAS (Lavar / Usar)
-app.post('/ropa/estado', appClientOrAuth, async (req: Request, res: Response) => {
+// 5. CAMBIAR ESTADO DE PRENDAS (Sin appClientOrAuth)
+app.post('/ropa/estado', async (req: Request, res: Response) => {
   try {
     const body = getRequestBody(req);
     const ids: string[] = Array.isArray(body.ids) ? body.ids : body.id ? [body.id] : [];
@@ -2879,8 +2764,8 @@ app.post('/ropa/estado', appClientOrAuth, async (req: Request, res: Response) =>
   }
 });
 
-// 6. GENERAR OUTFIT CON GEMINI
-app.post('/ropa/outfit', appClientOrAuth, async (req: Request, res: Response) => {
+// 6. GENERAR OUTFIT CON GEMINI (Sin appClientOrAuth)
+app.post('/ropa/outfit', async (req: Request, res: Response) => {
   try {
     const body = getRequestBody(req);
     const ocasion = typeof body.ocasion === 'string' ? body.ocasion : 'Facultad / Taller';
@@ -2970,6 +2855,10 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   });
 });
 
+/* =========================================================
+   START
+   ========================================================= */
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log('======================================');
   console.log('Torchill API iniciada');
@@ -3018,5 +2907,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('POST /api/github/webhook [SIGNED GITHUB]');
   console.log('POST /analyze-receipt [BASE44 CLIENT OR API_TOKEN]');
   console.log('POST /generate-text [BASE44 CLIENT OR API_TOKEN]');
+  console.log('ROPA ENDPOINTS: /ropa/upload, /ropa/armario, /ropa/prenda, /ropa/avatar, /ropa/estado, /ropa/outfit');
   console.log('======================================');
 });
