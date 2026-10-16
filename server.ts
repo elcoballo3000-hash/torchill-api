@@ -2651,7 +2651,7 @@ function extractFileBuffer(req: Request): Buffer | null {
 }
 
 // 1. OBTENER CATÁLOGO DEL ARMARIO (Con URLs firmadas de R2)
-app.get('/ropa/armario', appClientOrAuth, async (_req: Request, res: Response) => {
+app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa/catalogo'], appClientOrAuth, async (_req: Request, res: Response) => {
   try {
     r2Config();
     const { items } = await getArmarioCatalog();
