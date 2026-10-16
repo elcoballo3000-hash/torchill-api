@@ -2653,11 +2653,38 @@ function extractFileBuffer(req: Request): Buffer | null {
 
 // 1. OBTENER CATÁLOGO DEL ARMARIO (Con URLs firmadas de R2)
 // ENDPOINT DE ANÁLISIS DE PRENDA PARA BASE44 (/ropa/analyze)
-app.post(['/ropa/analyze', '/api/ropa/analyze'], upload.single('file'), async (req: Request, res: Response) => {
+// ENDPOINT DE ANÁLISIS DE PRENDA PARA BASE44 (/ropa/analyze)
+app.post(['/ropa/analyze', '/api/ropa/analyze'], upload.any(), async (req: Request, res: Response) => {
   try {
-    const rawBuffer = extractFileBuffer(req);
+    // 1. Buscar archivo en multipart bajo cualquier nombre de campo
+    const files = (req as any).files as Array<{ buffer?: Buffer }> | undefined;
+    const singleFile = (req as any).file as { buffer?: Buffer } | undefined;
+    let rawBuffer: Buffer | null = singleFile?.buffer || (files && files.length > 0 ? files[0].buffer || null : null);
 
+    // 2. Si no vino en multipart, buscar en cualquier propiedad Base64 del body JSON
     if (!rawBuffer) {
+      const body = getRequestBody(req);
+      const possibleBase64 =
+        body.dataBase64 ||
+        body.base64 ||
+        body.image ||
+        body.image_url ||
+        body.imageUrl ||
+        body.data ||
+        body.file ||
+        body.photo ||
+        '';
+
+      if (typeof possibleBase64 === 'string' && possibleBase64.length > 0) {
+        const clean = possibleBase64.replace(/^data:[^;]+;base64,/i, '');
+        try {
+          rawBuffer = Buffer.from(clean, 'base64');
+        } catch {}
+      }
+    }
+
+    if (!rawBuffer || rawBuffer.length === 0) {
+      console.warn('Analyze: no se recibió ningún buffer ni base64 válido.');
       return res.status(400).json({ error: 'Falta la imagen para analizar.' });
     }
 
