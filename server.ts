@@ -2654,37 +2654,71 @@ function extractFileBuffer(req: Request): Buffer | null {
 // 1. OBTENER CATÁLOGO DEL ARMARIO (Con URLs firmadas de R2)
 // ENDPOINT DE ANÁLISIS DE PRENDA PARA BASE44 (/ropa/analyze)
 // ENDPOINT DE ANÁLISIS DE PRENDA PARA BASE44 (/ropa/analyze)
+// ENDPOINT DE ANÁLISIS DE PRENDA PARA BASE44 (/ropa/analyze)
 app.post(['/ropa/analyze', '/api/ropa/analyze'], upload.any(), async (req: Request, res: Response) => {
   try {
-    // 1. Buscar archivo en multipart bajo cualquier nombre de campo
+    let rawBuffer: Buffer | null = null;
+
+    // 1. Caso Multipart (FormData)
     const files = (req as any).files as Array<{ buffer?: Buffer }> | undefined;
     const singleFile = (req as any).file as { buffer?: Buffer } | undefined;
-    let rawBuffer: Buffer | null = singleFile?.buffer || (files && files.length > 0 ? files[0].buffer || null : null);
+    if (singleFile?.buffer) {
+      rawBuffer = singleFile.buffer;
+    } else if (files && files.length > 0 && files[0].buffer) {
+      rawBuffer = files[0].buffer;
+    }
 
-    // 2. Si no vino en multipart, buscar en cualquier propiedad Base64 del body JSON
+    // 2. Caso Body (JSON o anidados)
     if (!rawBuffer) {
-      const body = getRequestBody(req);
-      const possibleBase64 =
-        body.dataBase64 ||
-        body.base64 ||
-        body.image ||
-        body.image_url ||
-        body.imageUrl ||
-        body.data ||
-        body.file ||
-        body.photo ||
-        '';
+      const body = typeof req.body === 'object' && req.body !== null ? req.body : {};
+      
+      // Buscar cualquier valor que parezca base64 en las claves del objeto
+      for (const key of Object.keys(body)) {
+        const val = body[key];
+        if (typeof val === 'string' && val.length > 100) {
+          const clean = val.replace(/^data:[^;]+;base64,/i, '');
+          try {
+            rawBuffer = Buffer.from(clean, 'base64');
+            break;
+          } catch {}
+        }
+      }
 
-      if (typeof possibleBase64 === 'string' && possibleBase64.length > 0) {
-        const clean = possibleBase64.replace(/^data:[^;]+;base64,/i, '');
-        try {
-          rawBuffer = Buffer.from(clean, 'base64');
-        } catch {}
+      // Si mandó una URL en vez de base64
+      if (!rawBuffer) {
+        const targetUrl = body.url || body.fileUrl || body.imageUrl || body.receiptUrl;
+        if (typeof targetUrl === 'string' && targetUrl.startsWith('http')) {
+          try {
+            const dl = await downloadReceipt(targetUrl);
+            rawBuffer = dl.buffer;
+          } catch (e) {
+            console.warn('No se pudo descargar desde URL enviada:', e);
+          }
+        }
+      }
+    }
+
+    // 3. Caso Texto Plano crudo (Base64 directo en req.body)
+    if (!rawBuffer && typeof req.body === 'string' && req.body.length > 50) {
+      const clean = req.body.trim().replace(/^data:[^;]+;base64,/i, '').replace(/^"|"$/g, '');
+      try {
+        rawBuffer = Buffer.from(clean, 'base64');
+      } catch {}
+    }
+
+    // 4. Caso Raw Buffer de Express
+    if (!rawBuffer && (req as any).rawBody && Buffer.isBuffer((req as any).rawBody) && (req as any).rawBody.length > 100) {
+      const text = (req as any).rawBody.toString('utf8');
+      if (text.includes('base64,')) {
+        const match = text.match(/base64,([A-Za-z0-9+/=]+)/);
+        if (match && match[1]) {
+          rawBuffer = Buffer.from(match[1], 'base64');
+        }
       }
     }
 
     if (!rawBuffer || rawBuffer.length === 0) {
-      console.warn('Analyze: no se recibió ningún buffer ni base64 válido.');
+      console.warn('Analyze: Body recibido:', typeof req.body === 'string' ? req.body.slice(0, 150) : JSON.stringify(req.body));
       return res.status(400).json({ error: 'Falta la imagen para analizar.' });
     }
 
@@ -2746,7 +2780,6 @@ Devuelve exclusivamente un JSON válido con esta estructura:
     });
   }
 });
-
 // 1. OBTENER CATÁLOGO DEL ARMARIO
 app.get(['/ropa/upload', '/ropa/armario', '/ropa/prendas', '/ropa/items', '/ropa/catalogo'], async (_req: Request, res: Response) => {
   try {
